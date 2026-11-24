@@ -412,9 +412,13 @@ decision to be made together with short-lived, RBAC-scoped credentials.
 - `execute` has `maximum_attempts=1`: remediation is never retried blindly.
 - A plan may only name a capability declared in `REMEDIATION_CAPABILITIES`
   (tool, verbs, and where the command lands), and at least one step must change
-  the system: a plan that only reads repeats the investigation. The model's own
-  `requires_approval` is overwritten. A plan that fails the guard rails never
-  reaches the approval gate: the run reports with the reason instead.
+  the system or be assigned to a person: a plan that only reads repeats the
+  investigation. The model's own `requires_approval` is overwritten. A plan that
+  fails the guard rails never reaches the approval gate: the run reports with the
+  reason instead.
+- A step assigned to a person carries no command, is never passed to the executor,
+  and is recorded as not executed with the reason. The audit trail never claims a
+  human step ran.
 - `DRY_RUN=true` by default; commands are rendered and audited, not executed, so
   verification reports "not verified" instead of a resolution it cannot prove.
 - `execute` fails closed when no executor is wired. A step that did not run

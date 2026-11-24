@@ -378,3 +378,29 @@ integración, revertir un cambio de configuración), y eso es decisión del oper
 Nota de alcance dejada a propósito: las filas agregadas llevan `dt.security_context`
 pero no el resto de `_SCOPE_FIELDS`; un despliegue que filtre por un campo fuera de la
 lista verá menos evidencia de logs (falla cerrado, nunca abre de más).
+
+**L17 (2026-11-24) — tercera corrección del usuario, textual:**
+
+> "piensa que el plan tambien puede proponer acciones que no son ejecutables por el aagente, si no que tendrán que hacerse manualmente por personas"
+
+Aceptado, y era una suposición mía: hasta ahora todo paso era un comando que el
+ejecutor corre. Ahora `RemediationStep.actor` es `agent` (default) o `human`. Un paso
+humano no lleva comando ni capacidad, tiene que decir qué debe hacer la persona
+(mínimo razonable, no una etiqueta), se registra como **no ejecutado** con el motivo,
+y el ejecutor del sandbox solo recibe pasos `agent`. Un plan compuesto solo de pasos
+humanos ya no falla cerrado por falta de ejecutor.
+
+Con `actor: human`, el modelo produjo sobre la evidencia real lo que ningún
+`rollout restart` podía expresar:
+
+```
+plan proposed by github_copilot/gpt-6-luna: 1 step(s), hypothesis confidence=0.55
+  1. [human/None] Contact the Avios partner support team to report the integration
+     failure since 13:00 and ask them to investigate the repeated PMT_PPM_8009 and
+     PMT_PPM_8015 payment rejections.
+```
+
+Y un segundo aprendizaje del mismo día: **un plan vacío se reintenta una vez**. El
+mismo prompt devolvió `steps: []` y un minuto después un plan válido, así que "sin
+pasos" no prueba que no haya nada que hacer; el reintento nombra la contradicción que
+el propio resumen ya contenía. Sigue acotado a un intento.

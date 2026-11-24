@@ -124,18 +124,35 @@ class Hypothesis(BaseModel):
     falsified_by: str | None = None
 
 
+class StepActor(StrEnum):
+    """Who performs a step.
+
+    Not every remediation is a command. Rotating a credential in a vendor console,
+    coordinating with a partner or changing code in a repository the run cannot
+    reach are actions a person performs — and a plan that pretends otherwise would
+    have the agent approve itself into doing nothing, or worse, into faking a step.
+    """
+
+    AGENT = "agent"
+    HUMAN = "human"
+
+
 class RemediationStep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order: int
     description: str
-    # Rendered shell command. Always produced, even in DRY_RUN.
-    command: str
+    #: Who performs it. `agent` steps run in the sandbox; `human` steps are an
+    #: instruction for a person and are never executed by this system.
+    actor: StepActor = StepActor.AGENT
+    # Rendered shell command. Required for an agent step, absent for a human one:
+    # a human step that carries a command is ambiguous about who runs it.
+    command: str | None = None
     target: str
     #: The declared capability this step uses. It is in the audit trail next to
     #: the command so a reviewer reads an intent (`restart_workload`) and not only
     #: a flag soup, and the guard rail checks the command against the vocabulary
-    #: that capability declared.
+    #: that capability declared. Absent on a human step.
     capability: str | None = None
     reversible: bool = True
     risk: Literal["low", "medium", "high"] = "medium"
@@ -167,8 +184,12 @@ class ActionRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     step_order: int
+    #: The command that ran, or the instruction a person was handed.
     command: str
     executed: bool
+    actor: StepActor = StepActor.AGENT
+    #: Why nothing ran, when nothing ran. Empty when the command did.
+    note: str = ""
     exit_code: int | None = None
     stdout: str = ""
     stderr: str = ""

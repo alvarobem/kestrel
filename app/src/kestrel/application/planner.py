@@ -27,7 +27,7 @@ from pydantic import ValidationError
 
 from kestrel.application.errors import PlanUnusable
 from kestrel.domain.evidence import select_top
-from kestrel.domain.models import Evidence, Incident, RemediationPlan, RemediationStep
+from kestrel.domain.models import Evidence, Incident, RemediationPlan, RemediationStep, StepActor
 from kestrel.domain.policy import RemediationSurface
 
 #: What the model is told it is doing. The rules are the product's, not the
@@ -52,6 +52,14 @@ SYSTEM_PROMPT = (
     "- Every step uses one of the capabilities declared under REMEDIATION SURFACE, "
     "sets `capability` to its id, and writes a command with that capability's tool "
     "and verbs. Nothing outside that list exists for you.\n"
+    "- Some remediation is not yours to perform. Use `actor: \"human\"` for a step a "
+    "person must do — touching a vendor console, coordinating with another team, "
+    "changing code in a repository you cannot reach. Omit `command` and `capability` "
+    "on those, and write the instruction so the person knows exactly what to do.\n"
+    "- A human step is an action someone takes, not an observation. If the answer is "
+    "'look at the logs', do not write a step: you already have what the investigation "
+    "found.\n"
+    "- A plan made only of human steps is valid when nothing else can be done.\n"
     "- Prefer the least invasive action that could fix the cause.\n"
     "- If the evidence does not support any action, return an empty `steps` list "
     "and explain why in `summary`. That is a valid and useful answer.\n"
@@ -71,9 +79,10 @@ SHAPE = """{
     {
       "order": 1,
       "description": "what this step does",
-      "command": "the exact shell command",
+      "actor": "agent, or human when a person has to do it",
+      "command": "the exact shell command; omit for a human step",
       "target": "the single entity it touches",
-      "capability": "the id of the declared capability this step uses",
+      "capability": "the id of the declared capability; omit for a human step",
       "reversible": true,
       "risk": "low",
       "rollback_command": "the command that undoes it"
@@ -191,11 +200,14 @@ def parse_plan(answer: str) -> RemediationPlan:
         raise PlanUnusable(_first_error(exc)) from exc
 
     if not plan.steps:
-        # A legitimate answer, not a malformed one: retrying would repeat it and
-        # cost another call. The model's own explanation is the useful part.
+        # Sometimes the honest answer, sometimes a hedge: the same prompt produced
+        # an empty plan once and a valid one a minute later, and the summary kept
+        # describing the action it had omitted. So it earns one retry that names the
+        # contradiction — never a loop, and never a fabricated step.
         raise PlanUnusable(
-            f"the evidence did not support any action: {_clip(plan.summary, 200)}",
-            repairable=False,
+            "the plan has no steps. Either no declared capability fits this incident, "
+            f"or the step was left out while the summary proposed: {_clip(plan.summary, 200)}",
+            repairable=True,
         )
 
     # The model does not decide whether a human is asked. It also does not decide
@@ -218,13 +230,15 @@ def require_usable(plan: RemediationPlan, surface: RemediationSurface) -> None:
         )
     problems = _problems(plan, surface)
     if not problems and not any(
-        surface.changes_something(step.capability) for step in plan.steps
+        step.actor is StepActor.HUMAN or surface.changes_something(step.capability)
+        for step in plan.steps
     ):
         # Structurally, not stylistically: a plan whose steps all observe is the
         # investigation repeated, and it would spend a human approval on a no-op.
+        # A human step counts — someone is being asked to act.
         problems.append(
             "the plan only reads information the investigation already gathered: "
-            "at least one step must change the system"
+            "at least one step must change the system or be assigned to a person"
         )
     if problems:
         raise PlanUnusable("; ".join(problems))
@@ -241,14 +255,43 @@ def _step_problems(step: RemediationStep, surface: RemediationSurface) -> list[s
     problems: list[str] = []
     if not step.target.strip():
         problems.append(f"step {step.order} names no target")
-    if "*" in step.command:
+    if step.actor is StepActor.HUMAN:
+        problems.extend(_human_step_problems(step))
+        return problems
+
+    command = (step.command or "").strip()
+    if not command:
+        problems.append(f"step {step.order} is an agent step with no command")
+        return problems
+    if "*" in command:
         problems.append(f"step {step.order} uses a wildcard")
-    tokens = _tokens(step.command)
+    tokens = _tokens(command)
     if any(token == "-A" or token.startswith("--all") for token in tokens):
         problems.append(f"step {step.order} addresses every object, not one")
     if not step.reversible and not (step.rollback_command or "").strip():
         problems.append(f"step {step.order} cannot be undone and carries no rollback command")
     problems.extend(_capability_problems(step, surface, tokens))
+    return problems
+
+
+#: Short enough to catch "investigate", long enough for "rotate the API key in the
+#: vendor console and confirm the next request succeeds".
+_MIN_HUMAN_INSTRUCTION = 15
+
+
+def _human_step_problems(step: RemediationStep) -> list[str]:
+    """A human step is an instruction without a command, and it has to be actionable."""
+    problems: list[str] = []
+    if (step.command or "").strip():
+        problems.append(
+            f"step {step.order} is assigned to a human and must not carry a command; "
+            "put the instruction in description"
+        )
+    if len(step.description.strip()) < _MIN_HUMAN_INSTRUCTION:
+        problems.append(
+            f"step {step.order} is assigned to a human and needs a concrete instruction, "
+            "not a label"
+        )
     return problems
 
 

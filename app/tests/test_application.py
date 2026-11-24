@@ -21,7 +21,16 @@ from kestrel.application import nodes
 from kestrel.application.deps import CoreDeps
 from kestrel.application.graph import NODE_FUNCTIONS
 from kestrel.config import Settings
-from kestrel.domain.models import Approval, Evidence, EvidenceKind, Phase, RemediationPlan
+from kestrel.domain.models import (
+    Approval,
+    Evidence,
+    EvidenceKind,
+    Hypothesis,
+    Phase,
+    RemediationPlan,
+    RemediationStep,
+    StepActor,
+)
 from kestrel.domain.policy import (
     DEFAULT_MAX_INVESTIGATION_ATTEMPTS,
     DEFAULT_MAX_REMEDIATION_ATTEMPTS,
@@ -109,8 +118,71 @@ async def test_execute_uses_the_injected_executor(
     assert [action.executed for action in result["actions"]] == [True]
 
 
-# --- investigation without the environment ---------------------------------
+def _mixed_plan() -> RemediationPlan:
+    return RemediationPlan(
+        summary="restart the deployment and confirm with the partner",
+        hypothesis=Hypothesis(statement="wedged after a failed rollout", confidence=0.6),
+        steps=[
+            RemediationStep(
+                order=1,
+                description="restart the deployment",
+                command="kubectl rollout restart deploy/checkout",
+                target="checkout",
+                capability="restart_workload",
+                rollback_command="kubectl rollout undo deploy/checkout",
+            ),
+            RemediationStep(
+                order=2,
+                description="Confirm with the partner that their outage is acknowledged",
+                target="avios",
+                actor=StepActor.HUMAN,
+            ),
+        ],
+    )
 
+
+async def test_execute_hands_a_human_step_to_a_person(state: dict, executor: Any) -> None:
+    state["plan"] = _mixed_plan()
+    state["approvals"] = [Approval(approved=True, actor="oncall")]
+    deps = CoreDeps(approval=ExplodingGateway(), dry_run=False, executor=executor)
+
+    result = await nodes.execute(state, deps)
+
+    # The sandbox only receives what the sandbox can run.
+    assert executor.steps == [state["plan"].steps[0]]
+    records = {record.step_order: record for record in result["actions"]}
+    assert records[1].executed is True
+    assert records[2].actor is StepActor.HUMAN
+    assert records[2].executed is False
+    assert "assigned to a person" in records[2].note
+    assert "handed to a person" in result["notes"][0]
+
+
+async def test_a_plan_of_human_steps_needs_no_executor(state: dict) -> None:
+    plan = RemediationPlan(
+        summary="rotate the credential",
+        hypothesis=Hypothesis(statement="the credential expired", confidence=0.7),
+        steps=[
+            RemediationStep(
+                order=1,
+                description="Rotate the Avios credential in the partner console",
+                target="avios",
+                actor=StepActor.HUMAN,
+            )
+        ],
+    )
+    state["plan"] = plan
+    state["approvals"] = [Approval(approved=True, actor="oncall")]
+    # No executor wired, and not a dry run: human steps alone do not need one.
+    deps = CoreDeps(approval=ExplodingGateway(), dry_run=False, executor=None)
+
+    result = await nodes.execute(state, deps)
+
+    assert result["phase"] == Phase.EXECUTING
+    assert [record.executed for record in result["actions"]] == [False]
+
+
+# --- investigation without the environment ---------------------------------
 
 async def test_investigate_degrades_without_a_telemetry_source(state: dict) -> None:
     deps = CoreDeps(approval=ExplodingGateway())

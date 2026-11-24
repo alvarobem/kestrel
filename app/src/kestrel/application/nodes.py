@@ -31,6 +31,7 @@ from kestrel.domain.models import (
     IncidentReport,
     Phase,
     RemediationPlan,
+    StepActor,
     Verification,
 )
 from kestrel.domain.policy import (
@@ -195,9 +196,9 @@ async def plan(state: IncidentState, deps: CoreDeps) -> dict:
     of the world, and none of them is a reason to lose the incident.
 
     The retry budget is one, not a loop: a model that produced an unusable answer
-    twice produces a third, and each attempt is a paid call. A plan the evidence
-    does not support is not retried at all — that answer is the model doing its
-    job.
+    twice produces a third, and each attempt is a paid call. That includes an empty
+    plan — the same prompt returned no steps once and a valid plan a minute later,
+    so "no steps" is not proof that nothing fits.
     """
     incident = state["incident"]
     evidence = dedupe(state.get("evidence") or [])
@@ -316,35 +317,67 @@ async def execute(state: IncidentState, deps: CoreDeps) -> dict:
         }
 
     attempts = state.get("remediation_attempts", 0) + 1
+    agent_steps = [step for step in plan.steps if step.actor is StepActor.AGENT]
+    human_steps = [step for step in plan.steps if step.actor is StepActor.HUMAN]
+
+    # A step the agent cannot perform is still part of the plan, and the audit
+    # trail has to say so: recording it as executed would be a lie, and dropping it
+    # would hide the work the human is now responsible for.
+    handed_over = [
+        ActionRecord(
+            step_order=step.order,
+            command=step.description,
+            executed=False,
+            actor=StepActor.HUMAN,
+            note="assigned to a person; this system does not perform it",
+        )
+        for step in human_steps
+    ]
 
     if deps.dry_run:
-        records = [
-            ActionRecord(step_order=step.order, command=step.command, executed=False)
-            for step in plan.steps
+        rendered = [
+            ActionRecord(
+                step_order=step.order,
+                command=step.command or "",
+                executed=False,
+                note="dry run: rendered, not executed",
+            )
+            for step in agent_steps
         ]
         return {
             "phase": Phase.EXECUTING,
-            "actions": records,
+            "actions": _ordered(rendered + handed_over),
             "remediation_attempts": attempts,
-            "notes": ["dry run: commands recorded, nothing executed"],
+            "notes": [
+                f"dry run: {len(agent_steps)} command(s) rendered, "
+                f"{len(human_steps)} step(s) left to a person"
+            ],
         }
 
-    if deps.executor is None:
+    if agent_steps and deps.executor is None:
         # Recording exit_code=0 here would write a fake success into the audit
-        # trail. Fail closed instead.
+        # trail. Fail closed instead. Human steps alone do not need an executor.
         return {
             "phase": Phase.FAILED,
             "remediation_attempts": attempts,
             "notes": ["execute blocked: no sandbox executor is wired and DRY_RUN is false"],
         }
 
-    records = [await deps.executor.execute(step) for step in plan.steps]
+    executed = [await deps.executor.execute(step) for step in agent_steps] if agent_steps else []
     return {
         "phase": Phase.EXECUTING,
-        "actions": records,
+        "actions": _ordered(executed + handed_over),
         "remediation_attempts": attempts,
-        "notes": [f"{len(records)} step(s) executed through the sandbox executor"],
+        "notes": [
+            f"{len(executed)} step(s) executed through the sandbox executor, "
+            f"{len(human_steps)} handed to a person"
+        ],
     }
+
+
+def _ordered(records: list[ActionRecord]) -> list[ActionRecord]:
+    """Steps are a sequence: the audit trail reads in execution order."""
+    return sorted(records, key=lambda record: record.step_order)
 
 
 async def verify(state: IncidentState, deps: CoreDeps) -> dict:
@@ -386,7 +419,9 @@ async def report(state: IncidentState, deps: CoreDeps) -> dict:
     verification = state.get("verification")
     resolved = bool(verification and verification.ok)
     actions = [
-        f"{a.step_order}. {a.command} (executed={a.executed})" for a in state.get("actions", [])
+        f"{a.step_order}. {('[human] ' if a.actor is StepActor.HUMAN else '')}{a.command}"
+        f" (executed={a.executed})"
+        for a in state.get("actions", [])
     ]
     hypothesis = state.get("hypothesis")
     # Attempts re-read overlapping windows, so collapse by signature without

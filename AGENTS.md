@@ -234,6 +234,14 @@ history diverge.
     declaration means no plan, never "any command". This is deliberately not an
     on-call vocabulary: a production restart and a broken build in integration are
     the same mechanism with different capabilities, so no code changes between them.
+17. **A step may belong to a person.** `RemediationStep.actor` is `agent` (default)
+    or `human`. A human step carries no command and no capability, must state what
+    the person should do, and is recorded as not executed with the reason; the
+    sandbox executor only ever receives agent steps, and a plan of human steps alone
+    does not need an executor. Rotating a credential in a vendor console,
+    coordinating with a partner or changing code in a repository the run cannot reach
+    are remediation, and a plan that cannot say so would either fake the step or
+    decline an incident it could have routed.
 
 ## Conventions
 

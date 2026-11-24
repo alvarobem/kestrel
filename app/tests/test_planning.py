@@ -137,16 +137,16 @@ def test_parse_refuses_text_that_is_not_json() -> None:
     assert caught.value.repairable is True
 
 
-def test_parse_treats_an_empty_plan_as_an_answer_not_a_defect() -> None:
-    answer = json.dumps(_payload(steps=[], summary="the evidence shows a healthy service"))
+def test_parse_treats_an_empty_plan_as_a_repairable_omission() -> None:
+    answer = json.dumps(_payload(steps=[], summary="restart the checkout deployment"))
 
     with pytest.raises(PlanUnusable) as caught:
         parse_plan(answer)
 
-    # Not repairable: asking again would repeat the same answer and cost another
-    # call. The model's explanation is what the human needs to read.
-    assert caught.value.repairable is False
-    assert "healthy service" in caught.value.detail
+    # The summary proposed an action the steps do not contain. One retry names that
+    # contradiction; a model can also legitimately repeat the empty answer.
+    assert caught.value.repairable is True
+    assert "restart the checkout deployment" in caught.value.detail
 
 
 # --- the guard rails --------------------------------------------------------
@@ -263,6 +263,73 @@ def test_guard_rail_accepts_a_read_step_next_to_a_change() -> None:
                     capability="inspect_workload",
                     command="kubectl get pods -n checkout",
                     rollback_command=None,
+                ),
+            ]
+        )
+    )
+
+
+def test_a_human_step_needs_no_command_and_no_capability() -> None:
+    # Some remediation is not the agent's to perform: a vendor console, a partner
+    # call, a code change in a repository it cannot reach.
+    _usable(
+        _payload(
+            steps=[
+                _step(
+                    actor="human",
+                    command=None,
+                    capability=None,
+                    description=(
+                        "Rotate the Avios API credential in the partner console and confirm "
+                        "the next request succeeds"
+                    ),
+                )
+            ]
+        )
+    )
+
+
+def test_a_human_step_may_not_carry_a_command() -> None:
+    # A step with a command and a human owner is ambiguous about who runs it.
+    with pytest.raises(PlanUnusable, match="must not carry a command"):
+        _usable(
+            _payload(
+                steps=[
+                    _step(
+                        actor="human",
+                        capability=None,
+                        description="Rotate the credential in the vendor console",
+                    )
+                ]
+            )
+        )
+
+
+def test_a_human_step_needs_a_concrete_instruction() -> None:
+    with pytest.raises(PlanUnusable, match="concrete instruction"):
+        _usable(
+            _payload(
+                steps=[_step(actor="human", command=None, capability=None, description="investigate")]
+            )
+        )
+
+
+def test_an_agent_step_without_a_command_is_refused() -> None:
+    with pytest.raises(PlanUnusable, match="no command"):
+        _usable(_payload(steps=[_step(command=None)]))
+
+
+def test_a_mixed_plan_is_accepted() -> None:
+    _usable(
+        _payload(
+            steps=[
+                _step(),
+                _step(
+                    order=2,
+                    actor="human",
+                    command=None,
+                    capability=None,
+                    description="Confirm with the partner that their outage is acknowledged",
                 ),
             ]
         )
@@ -440,13 +507,24 @@ async def test_plan_recovers_on_the_repair_attempt(
     assert len(llm.prompts) == 2
 
 
-async def test_plan_does_not_retry_an_empty_plan(
+async def test_plan_retries_an_empty_plan_once_then_degrades(
     state: dict, approval_gateway: Any, llm: Any
 ) -> None:
-    llm.answers = [json.dumps(_payload(steps=[], summary="the service looks healthy"))]
+    llm.answers = [json.dumps(_payload(steps=[], summary="nothing safe to do"))] * 2
 
     result = await nodes.plan(state, _deps(approval_gateway, llm))
 
     assert result["plan"] is None
-    assert len(llm.prompts) == 1
-    assert "the service looks healthy" in result["notes"][0]
+    assert len(llm.prompts) == 2
+    assert "no steps" in result["notes"][0]
+
+
+async def test_plan_recovers_when_the_retry_supplies_the_step(
+    state: dict, approval_gateway: Any, llm: Any
+) -> None:
+    llm.answers = [json.dumps(_payload(steps=[], summary="restart the deployment")), GOOD_ANSWER]
+
+    result = await nodes.plan(state, _deps(approval_gateway, llm))
+
+    assert result["plan"] is not None
+    assert len(llm.prompts) == 2
