@@ -65,6 +65,12 @@ avg(dt.service.request.response_time)` with `filter: {dt.entity.service == "…"
 failure ratio and a latest-vs-baseline comparison, both unit-free, and the raw response-time series
 travels in the payload without a unit claim. A service with no request metrics produces no item.
 
+**S12 — Evidence is collapsed and ranked before anyone reads it.**
+Acceptance: `domain/evidence.py` (pure) provides `signature`, `merge_repeated` (sums repeats within one
+read), `dedupe` (keeps the larger count across reads) and `rank_evidence` (kind weight + relevance to the
+incident + capped repetition bonus); ranking never mutates `confidence`; `investigate` merges its own
+read, and `report` prints the top five ranked items.
+
 ## Out of scope, stated on purpose
 
 Metrics and per-service log filtering. A wrong metric selector returns an empty result silently, and the
@@ -85,6 +91,7 @@ empty. They land in the next slice once we have seen the tenant's metric catalog
 | T8 | S9 | Live run: `provider-check` + `smoke` with the real platform token | inline | done |
 | T9 | S10 | Scope the log query to the incident's entities + environment, fail closed without one | inline | done |
 | T10 | S11 | Service metrics: failure ratio + trend per entity, absence tolerated | inline | done |
+| T11 | S12 | `domain/evidence.py` + merging in `investigate` + ranked `top_evidence` in the report | inline | done |
 
 ## Log
 
@@ -198,6 +205,21 @@ Two findings that shaped the implementation:
 
 Live proof: an incident with `entity_ids: ["SERVICE-001301D820D224E8"]` produced
 `[metric] dynatrace conf=0.75 :: SERVICE-001301D820D224E8: failure ratio 100.00% (64 of 64); failures/interval 4 vs baseline 10 (steady)`.
+
+**L11 — ranking, and what it fixed in one live run.**
+The rules are pure and live in the domain, because they are product judgment about *facts*, not transport.
+Deliberate choices:
+- ranking is a derived view and does **not** touch `confidence` — the provider's number is a claim about its
+  own fact, and a rank is our preference; mixing them hides which is which;
+- `merge_repeated` sums repeats **within one read** (honest: one query, one window) while `dedupe` keeps the
+  larger count **across reads**, because a retried attempt re-reads an overlapping window and summing would
+  inflate the volume it reports. That distinction is the whole reason there are two functions;
+- the volume bonus is capped at ten occurrences: after that, more repetition adds nothing.
+
+Live proof on the tenant, incident `PD-rank-1` (`order-handler`):
+`order-handler errors: 2 evidence item(s)` with
+`[log] order-handler: DBM-ROP Failed to retrieve airline information. (x12)` ranked above the triage note.
+Thirteen raw facts became two, and the one that explains the incident is first.
 
 **L8 — pending mirror.**
 Engram is unavailable in this session (`could not resolve an authoritative OpenCode runtime session`), so

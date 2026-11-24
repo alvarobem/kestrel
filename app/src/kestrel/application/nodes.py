@@ -19,6 +19,7 @@ from __future__ import annotations
 from kestrel.application.deps import CoreDeps
 from kestrel.application.errors import TelemetryUnavailable
 from kestrel.application.state import IncidentState
+from kestrel.domain.evidence import dedupe, merge_repeated, rank_evidence
 from kestrel.domain.models import (
     ActionRecord,
     Approval,
@@ -142,6 +143,10 @@ async def investigate(state: IncidentState, deps: CoreDeps) -> dict:
     except TelemetryUnavailable as exc:
         found = []
         reason = f"{provider.provider_id} could not answer: {exc.detail}"
+
+    # One read, so summing repeats is honest: twelve identical lines are one
+    # finding about volume, and state is checkpointed after every node.
+    found = merge_repeated(found)
 
     if not found:
         reason = reason or (
@@ -311,7 +316,10 @@ async def report(state: IncidentState, deps: CoreDeps) -> dict:
         f"{a.step_order}. {a.command} (executed={a.executed})" for a in state.get("actions", [])
     ]
     hypothesis = state.get("hypothesis")
-    evidence_count = len(state.get("evidence") or [])
+    # Attempts re-read overlapping windows, so collapse by signature without
+    # summing counts before deciding what a human should read first.
+    evidence = dedupe(state.get("evidence") or [])
+    top = _top_evidence(evidence, incident)
     return {
         "phase": Phase.RESOLVED if resolved else Phase.FAILED,
         "report": IncidentReport(
@@ -320,16 +328,25 @@ async def report(state: IncidentState, deps: CoreDeps) -> dict:
             # reads from the CLI whether the investigation actually found anything
             # or merely ran.
             summary=(
-                f"{incident.title}: {evidence_count} evidence item(s), "
+                f"{incident.title}: {len(evidence)} evidence item(s), "
                 f"{len(actions)} action(s), resolved={resolved}"
             ),
             root_cause=hypothesis.statement if hypothesis else None,
             actions_taken=actions,
+            top_evidence=top,
             resolved=resolved,
             follow_ups=["wire real investigation, planning and verification"],
         ),
         "notes": [f"report generated (resolved={resolved})"],
     }
+
+
+def _top_evidence(evidence: list[Evidence], incident, *, limit: int = 5) -> list[str]:
+    """The short lines a human reads first in the report."""
+    return [
+        f"[{item.kind}] {item.summary}" + (f" (x{item.occurrences})" if item.occurrences > 1 else "")
+        for item in rank_evidence(evidence, incident, limit=limit)
+    ]
 
 
 # --- routing ---------------------------------------------------------------

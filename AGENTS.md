@@ -59,6 +59,7 @@ imports only ever point inward.
 app/src/kestrel/
   domain/                  innermost: nothing to depend on
     models.py              entities crossing process boundaries
+    evidence.py            merging, dedupe and ranking rules (pure)
     policy.py              RunLimits + bounded-attempt defaults
   application/             use cases; no framework, no settings
     ports.py               ApprovalGateway, TelemetryProvider, RemediationExecutor,

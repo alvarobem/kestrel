@@ -295,6 +295,18 @@ the payload. Not every service reports request metrics — one tenant's
 `order-handler` reports none while its logs are rich — so an empty answer is
 normal, not a fault, and produces no item.
 
+**Evidence is collapsed and ranked, not dumped.** `domain/evidence.py` holds the
+rules, pure and provider-free: `merge_repeated` turns N identical messages into one
+item that says N; `dedupe` keeps one representative across reads without summing
+counts (a retried investigation re-reads an overlapping window, and summing would
+inflate the volume it reports); `rank_evidence` orders what survives by kind, by
+whether it names the incident's own entity, and by repetition — capped, so the
+tenth repeat adds nothing. Ranking never edits `Evidence.confidence`: that number is
+the provider's claim about its own fact, and rewriting it to express our preference
+would launder an opinion into a measurement. The score is derived and out of state,
+so Phase 2 can weight evidence differently without migrating anything. The report
+prints the top five, which is how a human reads a run in one screen.
+
 **Environment is not a global setting, and must not become one.** A Dynatrace
 entity id (`SERVICE-30CF729466F91717`) exists in exactly one environment, so the
 incident itself carries the environment: the same agent investigates an incident

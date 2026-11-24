@@ -631,3 +631,53 @@ async def test_a_metrics_failure_does_not_lose_the_logs() -> None:
     assert [item for item in found if item.kind == EvidenceKind.LOG]
     note = next(item for item in found if item.kind == EvidenceKind.NOTE)
     assert "service metrics unavailable" in note.summary
+
+
+# --- ranking reaches the report --------------------------------------------
+
+
+async def test_investigate_collapses_repeated_messages(state: dict, telemetry: Any) -> None:
+    """Twelve identical lines are one finding about volume, and state is checkpointed."""
+    repeated = [
+        Evidence(
+            provider="stub",
+            kind=EvidenceKind.LOG,
+            summary="order-handler: same failure",
+            external_id=f"trace-{index}",
+            payload={"service.name": "order-handler", "content": "same failure"},
+        )
+        for index in range(12)
+    ]
+    telemetry.evidence = repeated
+
+    result = await nodes.investigate(
+        state, CoreDeps(approval=_NeverCalled(), telemetry=telemetry)
+    )
+
+    assert len(result["evidence"]) == 1
+    assert result["evidence"][0].occurrences == 12
+
+
+async def test_the_report_lists_the_top_ranked_evidence(state: dict, deps: CoreDeps) -> None:
+    state["evidence"] = [
+        Evidence(provider="stub", kind=EvidenceKind.NOTE, summary="bookkeeping"),
+        Evidence(
+            provider="dynatrace",
+            kind=EvidenceKind.ALERT,
+            summary="davis: checkout failing",
+            external_id="P-9",
+        ),
+        Evidence(
+            provider="dynatrace",
+            kind=EvidenceKind.LOG,
+            summary="order-handler: boom",
+            occurrences=4,
+        ),
+    ]
+
+    result = await nodes.report(state, deps)
+
+    top = result["report"].top_evidence
+    assert top[0].startswith("[alert]")
+    assert any("(x4)" in line for line in top)
+    assert "3 evidence item(s)" in result["report"].summary

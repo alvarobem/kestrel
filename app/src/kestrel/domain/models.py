@@ -108,6 +108,11 @@ class Evidence(BaseModel):
     payload: dict = Field(default_factory=dict)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     collected_at: datetime = Field(default_factory=_now)
+    #: How many identical facts this item stands for. Twelve equal log lines are
+    #: one finding about volume; `1` means "reported once".
+    occurrences: int = Field(default=1, ge=1)
+    #: When the last of those occurrences was seen, for a collapsed item.
+    last_seen: datetime | None = None
 
 
 class Hypothesis(BaseModel):
@@ -180,5 +185,7 @@ class IncidentReport(BaseModel):
     summary: str
     root_cause: str | None = None
     actions_taken: list[str] = Field(default_factory=list)
+    #: The ranked evidence a human should read first, as short lines.
+    top_evidence: list[str] = Field(default_factory=list)
     resolved: bool = False
     follow_ups: list[str] = Field(default_factory=list)
