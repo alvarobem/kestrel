@@ -19,6 +19,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from kestrel.domain.policy import (
     DEFAULT_MAX_INVESTIGATION_ATTEMPTS,
     DEFAULT_MAX_REMEDIATION_ATTEMPTS,
+    Capability,
+    RemediationSurface,
     RunLimits,
 )
 
@@ -92,6 +94,19 @@ class Settings(BaseSettings):
     max_investigation_attempts: int = DEFAULT_MAX_INVESTIGATION_ATTEMPTS
     max_remediation_attempts: int = DEFAULT_MAX_REMEDIATION_ATTEMPTS
 
+    # --- The action space a plan may name -----------------------------------
+    # A plan is shell commands, so the model has to know what the environment can
+    # reach. Declaring *capabilities* (not verb lists) is what turns "invent a
+    # command" into "write a command inside this vocabulary" — and it is what lets
+    # one mechanism cover a production restart and a broken build in integration.
+    #
+    # Format: one capability per `;`, five `|`-separated fields,
+    #   id | tool | verbs | must_contain | description
+    # with `verbs` and `must_contain` comma-separated. Empty means undeclared,
+    # and the planner then degrades instead of guessing: an empty surface is not
+    # "anything goes".
+    remediation_capabilities: str = ""
+
     @property
     def tracing_enabled(self) -> bool:
         return bool(self.langfuse_public_key and self.langfuse_secret_key)
@@ -99,6 +114,11 @@ class Settings(BaseSettings):
     @property
     def scope_tags(self) -> list[str]:
         return [tag.strip() for tag in self.dynatrace_scope_tags.split(",") if tag.strip()]
+
+    @property
+    def remediation_surface(self) -> RemediationSurface:
+        """The declared capabilities as the value a run carries, frozen at start."""
+        return RemediationSurface(capabilities=_parse_capabilities(self.remediation_capabilities))
 
     @property
     def run_limits(self) -> RunLimits:
@@ -116,3 +136,37 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def _parse_capabilities(raw: str) -> tuple[Capability, ...]:
+    """Parse the capability declaration.
+
+    Deliberately strict and loud: a malformed declaration stops the worker at
+    startup, because the alternative is a run that plans nothing and leaves the
+    operator reading logs to find out why. Same rule as an unknown telemetry
+    provider.
+    """
+    capabilities: list[Capability] = []
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        fields = [field.strip() for field in entry.split("|", 4)]
+        if len(fields) < 2 or not fields[0] or not fields[1]:
+            raise ValueError(
+                f"REMEDIATION_CAPABILITIES entry {entry!r} must start with `id|tool`"
+            )
+        capabilities.append(
+            Capability(
+                id=fields[0],
+                tool=fields[1],
+                verbs=_csv(fields[2]) if len(fields) > 2 else (),
+                must_contain=_csv(fields[3]) if len(fields) > 3 else (),
+                description=fields[4] if len(fields) > 4 else "",
+            )
+        )
+    return tuple(capabilities)
+
+
+def _csv(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())

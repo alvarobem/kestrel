@@ -55,6 +55,9 @@ def build_deps(settings: Settings) -> CoreDeps:
         # and says so instead of failing to start.
         telemetry=build_telemetry_provider(settings),
         scope=InvestigationScope(tags=tuple(settings.scope_tags)),
+        # What a plan may name. Declared here, once, so no node can widen it and
+        # an operator editing `.env` cannot change an in-flight run.
+        surface=settings.remediation_surface,
         # No isolated executor exists yet, so `execute` fails closed when the
         # run is not a dry run. Wiring one is the sandbox decision (§13).
         executor=None,
@@ -95,7 +98,7 @@ async def main() -> None:
     deps = build_deps(settings)
     logger.info(
         "worker ready | temporal=%s namespace=%s queue=%s tracing=%s dry_run=%s approval=%s "
-        "telemetry=%s configured=%s scope=%s llm=%s configured=%s model=%s",
+        "telemetry=%s configured=%s scope=%s llm=%s configured=%s model=%s surface=%s",
         settings.temporal_address,
         settings.temporal_namespace,
         settings.temporal_task_queue,
@@ -108,6 +111,11 @@ async def main() -> None:
         settings.llm_provider,
         deps.llm is not None,
         deps.llm.model_id if deps.llm is not None else "none",
+        (
+            f"{deps.surface.tool}:{deps.surface.namespace or '-'}"
+            if deps.surface.declared
+            else "undeclared"
+        ),
     )
 
     try:

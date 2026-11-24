@@ -27,7 +27,8 @@ from pydantic import ValidationError
 
 from kestrel.application.errors import PlanUnusable
 from kestrel.domain.evidence import select_top
-from kestrel.domain.models import Evidence, Incident, RemediationPlan
+from kestrel.domain.models import Evidence, Incident, RemediationPlan, RemediationStep
+from kestrel.domain.policy import RemediationSurface
 
 #: What the model is told it is doing. The rules are the product's, not the
 #: prompt's: each one exists because a plan that breaks it is unusable at the
@@ -44,6 +45,9 @@ SYSTEM_PROMPT = (
     "- A step that cannot be undone must carry a `rollback_command`. If you cannot "
     "write the rollback, do not propose the step.\n"
     "- Never put a credential, token or password in a command.\n"
+    "- Every step uses one of the capabilities declared under REMEDIATION SURFACE, "
+    "sets `capability` to its id, and writes a command with that capability's tool "
+    "and verbs. Nothing outside that list exists for you.\n"
     "- Prefer the least invasive action that could fix the cause.\n"
     "- If the evidence does not support any action, return an empty `steps` list "
     "and explain why in `summary`. That is a valid and useful answer.\n"
@@ -65,6 +69,7 @@ SHAPE = """{
       "description": "what this step does",
       "command": "the exact shell command",
       "target": "the single entity it touches",
+      "capability": "the id of the declared capability this step uses",
       "reversible": true,
       "risk": "low",
       "rollback_command": "the command that undoes it"
@@ -87,13 +92,22 @@ class PlanPrompt:
 
 
 def build_prompt(
-    incident: Incident, evidence: list[Evidence], *, limit: int = EVIDENCE_LIMIT
+    incident: Incident,
+    evidence: list[Evidence],
+    surface: RemediationSurface,
+    *,
+    limit: int = EVIDENCE_LIMIT,
 ) -> PlanPrompt:
     """The question, built from what the run already knows.
 
     Only `summary` travels from each evidence item. `payload` stays home on
     purpose: it holds raw log lines and provider records, and this text is about
     to cross a process and a vendor boundary.
+
+    The surface travels because a planner that does not know what it may run
+    writes nothing usable: a careful model refuses, and a careless one invents a
+    deployment name. Declaring the vocabulary is what makes "no plan" the
+    exception rather than the rule.
     """
     incident_block = [
         f"id: {incident.id}",
@@ -118,10 +132,35 @@ def build_prompt(
     user = (
         "INCIDENT\n" + "\n".join(incident_block) + "\n\n"
         "EVIDENCE (ranked, most useful first)\n" + "\n".join(evidence_block) + "\n\n"
-        "REQUIRED SHAPE\n" + SHAPE + "\n\n"
+        "REMEDIATION SURFACE (the only commands you may propose)\n"
+        + "\n".join(_surface_block(surface))
+        + "\n\nREQUIRED SHAPE\n" + SHAPE + "\n\n"
         "Return the JSON object now."
     )
     return PlanPrompt(system=SYSTEM_PROMPT, user=user)
+
+
+def _surface_block(surface: RemediationSurface) -> list[str]:
+    """How the declared capabilities read inside a prompt.
+
+    One line per capability, in the operator's own words. It never claims more
+    than was declared: a tool with no verbs is stated as such, and an undeclared
+    surface says so instead of implying freedom.
+    """
+    if not surface.declared:
+        return ["(no capability is declared: no command can be proposed)"]
+    lines: list[str] = []
+    for capability in surface.capabilities:
+        line = f"- {capability.id}: tool `{capability.tool}`"
+        if capability.verbs:
+            line += f", verbs: {', '.join(capability.verbs)}"
+        if capability.must_contain:
+            line += ", the command must contain: " + " / ".join(capability.must_contain)
+        if capability.description:
+            line += f" — {capability.description}"
+        lines.append(line)
+    lines.append('Every step sets "capability" to one of these ids.')
+    return lines
 
 
 def repair_tail(problem: str) -> str:
@@ -162,28 +201,93 @@ def parse_plan(answer: str) -> RemediationPlan:
     return plan.model_copy(update={"steps": ordered, "requires_approval": True})
 
 
-def require_usable(plan: RemediationPlan) -> None:
+def require_usable(plan: RemediationPlan, surface: RemediationSurface) -> None:
     """Refuse a plan that no reviewer could approve with confidence."""
-    problems = _problems(plan)
+    if not surface.declared:
+        # Not a retryable defect: there is nothing the model could answer that
+        # would make an undeclared vocabulary safe.
+        raise PlanUnusable(
+            "no remediation surface is declared: every command would be a guess",
+            repairable=False,
+        )
+    problems = _problems(plan, surface)
     if problems:
         raise PlanUnusable("; ".join(problems))
 
 
-def _problems(plan: RemediationPlan) -> list[str]:
+def _problems(plan: RemediationPlan, surface: RemediationSurface) -> list[str]:
     problems: list[str] = []
     for step in plan.steps:
-        if not step.target.strip():
-            problems.append(f"step {step.order} names no target")
-        tokens = _tokens(step.command)
-        if "*" in step.command:
-            problems.append(f"step {step.order} uses a wildcard")
-        elif any(token == "-A" or token.startswith("--all") for token in tokens):
-            problems.append(f"step {step.order} addresses every object, not one")
-        if not step.reversible and not (step.rollback_command or "").strip():
-            problems.append(
-                f"step {step.order} cannot be undone and carries no rollback command"
-            )
+        problems.extend(_step_problems(step, surface))
     return problems
+
+
+def _step_problems(step: RemediationStep, surface: RemediationSurface) -> list[str]:
+    problems: list[str] = []
+    if not step.target.strip():
+        problems.append(f"step {step.order} names no target")
+    if "*" in step.command:
+        problems.append(f"step {step.order} uses a wildcard")
+    tokens = _tokens(step.command)
+    if any(token == "-A" or token.startswith("--all") for token in tokens):
+        problems.append(f"step {step.order} addresses every object, not one")
+    if not step.reversible and not (step.rollback_command or "").strip():
+        problems.append(f"step {step.order} cannot be undone and carries no rollback command")
+    problems.extend(_capability_problems(step, surface, tokens))
+    return problems
+
+
+#: Flags whose value is the next token, so the verb check does not mistake a
+#: namespace or a file for an action.
+_FLAGS_WITH_VALUE = {"-n", "--namespace", "--context", "-c", "--kubeconfig", "-f", "--file"}
+
+
+def _capability_problems(
+    step: RemediationStep, surface: RemediationSurface, tokens: list[str]
+) -> list[str]:
+    """The command must stay inside the capability the step declared.
+
+    The step names an intent; the check is that the command delivers that intent
+    with the declared tool, one of its verbs, and the literals that pin where it
+    lands. Nothing here knows what a namespace or a pipeline is — the vocabulary
+    belongs to the operator, not to this module.
+    """
+    used = (step.capability or "").strip()
+    if not used:
+        return [f"step {step.order} names no capability"]
+    capability = surface.find(used)
+    if capability is None:
+        known = ", ".join(item.id for item in surface.capabilities)
+        return [f"step {step.order} uses unknown capability {used!r} (declared: {known})"]
+    if not tokens:
+        return [f"step {step.order} has an empty command"]
+    if tokens[0].strip().lower() != capability.tool.strip().lower():
+        return [
+            f"step {step.order} runs {tokens[0]!r}, but capability {capability.id!r} "
+            f"uses {capability.tool!r}"
+        ]
+    problems: list[str] = []
+    verb = _verb_after(tokens)
+    if not capability.allows_verb(verb):
+        problems.append(
+            f"step {step.order} uses verb {verb!r}, which capability {capability.id!r} "
+            "does not allow"
+        )
+    missing = [literal for literal in capability.must_contain if literal not in step.command]
+    if missing:
+        problems.append(
+            f"step {step.order} must contain {missing[0]!r} to use capability "
+            f"{capability.id!r}"
+        )
+    return problems
+
+
+def _verb_after(tokens: list[str]) -> str:
+    """The action, skipping the tool and any global flag that precedes it."""
+    index = 1
+    while index < len(tokens) and tokens[index].startswith("-"):
+        index += 2 if tokens[index] in _FLAGS_WITH_VALUE else 1
+    return tokens[index] if index < len(tokens) else ""
 
 
 def _tokens(command: str) -> list[str]:

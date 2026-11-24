@@ -36,6 +36,7 @@ from kestrel.domain.models import (
 from kestrel.domain.policy import (
     DEFAULT_MAX_INVESTIGATION_ATTEMPTS,
     DEFAULT_MAX_REMEDIATION_ATTEMPTS,
+    RemediationSurface,
 )
 
 # --- pure helpers ----------------------------------------------------------
@@ -200,6 +201,16 @@ async def plan(state: IncidentState, deps: CoreDeps) -> dict:
     """
     incident = state["incident"]
     evidence = dedupe(state.get("evidence") or [])
+    surface = deps.surface
+    if not surface.declared:
+        # Without a declared vocabulary there is no honest command to write. The
+        # model would either refuse (the good case) or invent a deployment name
+        # (the case this guard exists for).
+        return _no_plan(
+            "no remediation capability is declared: set REMEDIATION_CAPABILITIES, "
+            "or any command would be a guess"
+        )
+
     llm = deps.llm
     if llm is None:
         return _no_plan(
@@ -207,9 +218,9 @@ async def plan(state: IncidentState, deps: CoreDeps) -> dict:
             "or configure one"
         )
 
-    prompt = build_prompt(incident, evidence)
+    prompt = build_prompt(incident, evidence, surface)
     try:
-        proposed = await _propose(llm, prompt.system, prompt.user)
+        proposed = await _propose(llm, prompt.system, prompt.user, surface)
     except LlmUnavailable as exc:
         return _no_plan(f"{llm.model_id} could not answer: {exc.detail}")
     except PlanUnusable as exc:
@@ -217,7 +228,7 @@ async def plan(state: IncidentState, deps: CoreDeps) -> dict:
             return _no_plan(exc.detail)
         try:
             proposed = await _propose(
-                llm, prompt.system, prompt.user + repair_tail(exc.detail)
+                llm, prompt.system, prompt.user + repair_tail(exc.detail), surface
             )
         except LlmUnavailable as retry_exc:
             return _no_plan(f"{llm.model_id} could not answer: {retry_exc.detail}")
@@ -235,10 +246,12 @@ async def plan(state: IncidentState, deps: CoreDeps) -> dict:
     }
 
 
-async def _propose(llm: LlmClient, system: str, user: str) -> RemediationPlan:
+async def _propose(
+    llm: LlmClient, system: str, user: str, surface: RemediationSurface
+) -> RemediationPlan:
     """One round trip: ask, parse, guard-rail. Raises rather than guessing."""
     plan = parse_plan(await llm.complete(system=system, user=user))
-    require_usable(plan)
+    require_usable(plan, surface)
     return plan
 
 

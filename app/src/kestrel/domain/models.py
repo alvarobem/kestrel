@@ -132,6 +132,11 @@ class RemediationStep(BaseModel):
     # Rendered shell command. Always produced, even in DRY_RUN.
     command: str
     target: str
+    #: The declared capability this step uses. It is in the audit trail next to
+    #: the command so a reviewer reads an intent (`restart_workload`) and not only
+    #: a flag soup, and the guard rail checks the command against the vocabulary
+    #: that capability declared.
+    capability: str | None = None
     reversible: bool = True
     risk: Literal["low", "medium", "high"] = "medium"
     rollback_command: str | None = None

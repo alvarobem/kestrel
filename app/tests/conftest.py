@@ -118,7 +118,7 @@ def no_ambient_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     about the unconfigured path would fail against a real 403.
     """
     for name in list(os.environ):
-        if name.startswith(("DYNATRACE_", "LANGFUSE_", "LLM_")):
+        if name.startswith(("DYNATRACE_", "LANGFUSE_", "LLM_", "REMEDIATION_")):
             monkeypatch.delenv(name, raising=False)
 
 

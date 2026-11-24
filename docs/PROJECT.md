@@ -410,6 +410,10 @@ decision to be made together with short-lived, RBAC-scoped credentials.
 - Human approval is a signal plus a persisted `Approval` record. Only the latest
   record authorizes the plan on the table.
 - `execute` has `maximum_attempts=1`: remediation is never retried blindly.
+- A plan may only name a capability declared in `REMEDIATION_CAPABILITIES`
+  (tool, verbs, and where the command lands), and the model's own
+  `requires_approval` is overwritten. A plan that fails the guard rails never
+  reaches the approval gate: the run reports with the reason instead.
 - `DRY_RUN=true` by default; commands are rendered and audited, not executed, so
   verification reports "not verified" instead of a resolution it cannot prove.
 - `execute` fails closed when no executor is wired. A step that did not run

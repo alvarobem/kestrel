@@ -6,7 +6,7 @@ two different things and that is deliberate:
   * ports — the capabilities the core drives (`approval`, `telemetry`, `llm`,
     `executor`);
   * policy values — decisions already taken somewhere else, frozen here
-    (`dry_run`, `scope`).
+    (`dry_run`, `scope`, `surface`).
 
 Policy values are values, not lookups: a node that reads `os.environ` is
 non-reproducible, and a router that does it diverges from Temporal's replay.
@@ -27,7 +27,7 @@ from kestrel.application.ports import (
     RemediationExecutor,
     TelemetryProvider,
 )
-from kestrel.domain.policy import InvestigationScope
+from kestrel.domain.policy import InvestigationScope, RemediationSurface
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +42,11 @@ class CoreDeps:
     #: that it degraded to the incident payload instead of pretending to have
     #: evidence.
     telemetry: TelemetryProvider | None = None
-    #: Policy value: what this run is allowed to read, frozen at start.
+    #: Policy value: what this run may read, frozen at start.
     scope: InvestigationScope = field(default_factory=InvestigationScope)
+    #: Policy value: the vocabulary a plan may name, frozen at start. Undeclared
+    #: means the planner has no legal commands and degrades instead of inventing.
+    surface: RemediationSurface = field(default_factory=RemediationSurface)
     #: `None` means no isolated runner is available, so `execute` fails closed
     #: when the run is not a dry run.
     executor: RemediationExecutor | None = None

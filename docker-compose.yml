@@ -28,6 +28,9 @@ x-agent-env: &agent-env
   TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-incident-workflow}
   DRY_RUN: ${DRY_RUN:-true}
   APPROVAL_MODE: ${APPROVAL_MODE:-human}
+  # The action space a plan may name. Empty inside the container means every plan
+  # degrades, so it travels with the app like any other policy value.
+  REMEDIATION_CAPABILITIES: ${REMEDIATION_CAPABILITIES:-}
   LLM_PROVIDER: ${LLM_PROVIDER:-copilot}
   LLM_MODEL: ${LLM_MODEL:-github_copilot/gpt-6-luna}
   # The Copilot seat token lives on a volume, so it survives recreating the

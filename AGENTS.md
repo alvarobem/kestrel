@@ -223,6 +223,14 @@ history diverge.
     is a frozen policy value: a provider returns nothing for an incident outside
     it, and an unconfigured provider degrades the run with a recorded reason
     instead of failing it.
+16. **A plan may only name a declared capability.** `REMEDIATION_CAPABILITIES`
+    declares the action space as capabilities — id, tool, allowed verbs, and the
+    literals that pin where a command lands — frozen into `CoreDeps.surface` when
+    the run starts. `application/planner.py` rejects a step that names an unknown
+    capability, uses another tool, or omits where it lands. An empty declaration
+    means no plan, never "any command". This is deliberately not an on-call
+    vocabulary: a production restart and a broken build in integration are the
+    same mechanism with different capabilities, so no code changes between them.
 
 ## Conventions
 

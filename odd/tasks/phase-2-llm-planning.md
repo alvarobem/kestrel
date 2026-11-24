@@ -86,7 +86,7 @@ worker.
 - T8 · S7,S9,S11 · inline · **hecho** · nodo `plan` con reparación acotada a un intento
 - T9 · S11 · inline · **hecho** · `smoke` explica "terminó sin pedir aprobación" y por qué
 - T10 · S7-S11 · inline · **hecho** · `test_planning.py` (15 casos) + `StubLlmClient`
-- T11 · S12 · **decisión del usuario** · declarar qué comandos puede nombrar un plan
+- T11 · S12 · inline · **hecho** · el vocabulario se declara como capacidades, no como verbos de kubectl
 
 ## Log
 
@@ -180,8 +180,7 @@ equivocado — el peor resultado posible para una herramienta que ejecuta accion
 no puede afirmar capacidades que el sistema no tiene (el sandbox sigue sin diseño,
 §13), así que el modelo no sabe qué vocabulario de acciones es legal. Mientras no se
 declare, `plan` degradará casi siempre con una razón correcta pero inútil para el
-on-call. Dos caminos, decisión del usuario:
-- **A. Vocabulario cerrado**: el modelo propone `RESTART_DEPLOYMENT`/`SCALE`/
+on-call. Dos caminos, decisión del usuario:- **A. Vocabulario cerrado**: el modelo propone `RESTART_DEPLOYMENT`/`SCALE`/
   `ROLLBACK` sobre un target, y el ejecutor renderiza el comando. Elimina la clase
   entera de "el modelo inventó un flag"; los guardarraíles pasan a ser estructurales.
 - **B. Superficie declarada**: el prompt recibe el contexto real (herramienta,
@@ -199,3 +198,45 @@ final phase=failed
   - approval gate reached with no plan
   - report generated (resolved=False)
 ```
+
+**L11 (2026-11-24) — corrección del usuario, textual:**
+
+> "piensa que esto no lo usare solo para oncall, imaginate que deja de arrancar un servicio en integracion por un fallo de código. No puede ser tan cerrado y pensando solo en on call. Ten esto en cuenta"
+
+Corrección aceptada: la primera versión de B era `tool` único + lista de verbos +
+namespace obligatorio, que es kubectl-y-on-call disfrazado. Rediseñado como **lista
+de capacidades** (`Capability`: `id`, `tool`, `verbs`, `must_contain`,
+`description`). El paso cita la capacidad que usa, y el guardarraíl comprueba
+herramienta, verbo y los literales que fijan dónde aterriza la acción. Nada en el
+dominio sabe qué es un namespace, un pipeline o una rama: el vocabulario lo declara
+el operador.
+
+Declaración en `.env` (formato: `id|tool|verbs|must_contain|description`, `;` entre
+capacidades). Producción on-call y un build roto en integración, mismo mecanismo:
+
+```
+REMEDIATION_CAPABILITIES=restart_workload|kubectl|rollout,scale,delete|-n checkout|restart, scale or delete one workload in checkout;read_workload|kubectl|get,describe,logs|-n checkout|read the state or logs of one workload in checkout
+```
+
+Evidencia con el modelo real y la superficie declarada:
+
+```
+declared: [('restart_workload','kubectl',('rollout','scale','delete'),('-n checkout',)),
+           ('read_workload','kubectl',('get','describe','logs'),('-n checkout',))]
+notes:    plan proposed by github_copilot/gpt-6-luna: 1 step(s), hypothesis confidence=0.90
+hypothesis: OrderHandler is returning 5xx because it is exhausting its Java heap. (0.9)
+  1. [read_workload] kubectl logs deployment/order-handler -n checkout --tail=100
+     target=order-handler reversible=True risk=low
+```
+
+Dos observaciones honestas:
+1. Con la superficie declarada, el modelo dejó de declinar y propuso un plan válido.
+2. Eligió **leer logs** antes que reiniciar. Es defendible (mirar antes de tocar),
+   pero un plan cuyo único paso es de lectura no remedia nada: si el operador no
+   quiere eso, no declara capacidades de solo lectura y el modelo queda forzado a
+   elegir una acción que cambia algo.
+
+Pendiente real, no bloqueante: `Capability` no se filtra por entorno. Hoy un
+despliegue de integración y uno de producción declaran superficies distintas en su
+propio `.env`; hacerlo por incidente necesita que `Incident` lleve el entorno, que
+el código ya insinúa con el entity id.
