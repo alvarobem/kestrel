@@ -1,0 +1,45 @@
+"""Errors the application raises when a rule of the application is violated.
+
+Typed on purpose. A driving adapter should not have to inspect an engine's
+exception hierarchy to answer "was this a duplicate?" — it catches
+`IncidentAlreadyRunning` and picks a status code. The engine-specific exception
+never leaves the outbound adapter.
+"""
+
+from __future__ import annotations
+
+
+class ApplicationError(Exception):
+    """Base class: something the caller asked for is not allowed or not possible."""
+
+
+class IncidentAlreadyRunning(ApplicationError):
+    """One incident, one run. Ingestion is idempotent, so a duplicate is refused."""
+
+    def __init__(self, incident_id: str) -> None:
+        super().__init__(f"incident {incident_id} already has a run")
+        self.incident_id = incident_id
+
+
+class IncidentNotFound(ApplicationError):
+    """No run exists for that incident."""
+
+    def __init__(self, incident_id: str) -> None:
+        super().__init__(f"no run for incident {incident_id}")
+        self.incident_id = incident_id
+
+
+class NoPendingApproval(ApplicationError):
+    """The run is not waiting for a decision, so there is nothing to decide."""
+
+    def __init__(self, incident_id: str) -> None:
+        super().__init__(f"incident {incident_id} is not waiting for approval")
+        self.incident_id = incident_id
+
+
+class RunUnavailable(ApplicationError):
+    """The engine could not be reached, or the run did not answer in time."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail

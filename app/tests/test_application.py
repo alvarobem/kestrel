@@ -1,0 +1,181 @@
+"""The ports, the injected dependencies and the composition root.
+
+These are the tests that could not exist before: the core runs with a fake
+approval channel and a fake executor, and the whole application is assembled
+from an explicitly constructed `Settings`, without reading the environment.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from kestrel.adapters.outbound.approval import (
+    AutoApprovalGateway,
+    GraphApprovalGateway,
+    to_approval,
+)
+from kestrel.application import nodes
+from kestrel.application.deps import CoreDeps
+from kestrel.application.graph import NODE_FUNCTIONS
+from kestrel.config import Settings
+from kestrel.domain.models import Approval, Phase, RemediationPlan
+from kestrel.domain.policy import (
+    DEFAULT_MAX_INVESTIGATION_ATTEMPTS,
+    DEFAULT_MAX_REMEDIATION_ATTEMPTS,
+    RunLimits,
+)
+from kestrel.worker import build_app, build_deps
+
+
+class ExplodingGateway:
+    """Fails loudly if the code path reaches the approval channel."""
+
+    def await_decision(self, *, incident_id: str, plan: Any) -> Approval:
+        raise AssertionError("nobody should be asked for a decision on this path")
+
+
+# --- approval through the port ---------------------------------------------
+
+
+async def test_approval_gate_asks_the_injected_gateway(
+    state: dict, plan: RemediationPlan, approval_gateway: Any
+) -> None:
+    state["plan"] = plan
+    deps = CoreDeps(approval=approval_gateway)
+
+    result = await nodes.approval_gate(state, deps)
+
+    assert result["phase"] == Phase.AWAITING_APPROVAL
+    assert [(a.approved, a.actor) for a in result["approvals"]] == [(True, "oncall")]
+    assert approval_gateway.calls == [("test-1", plan)]
+
+
+async def test_approval_gate_records_a_rejection(
+    state: dict, plan: RemediationPlan, make_gateway: Any
+) -> None:
+    state["plan"] = plan
+    rejection = Approval(approved=False, actor="oncall", comment="too risky")
+
+    result = await nodes.approval_gate(state, CoreDeps(approval=make_gateway(rejection)))
+
+    assert result["approvals"] == [rejection]
+
+
+async def test_approval_gate_without_a_plan_never_reaches_the_channel(state: dict) -> None:
+    deps = CoreDeps(approval=ExplodingGateway())
+
+    result = await nodes.approval_gate(state, deps)
+
+    assert result["phase"] == Phase.AWAITING_APPROVAL
+    assert "no plan" in result["notes"][0]
+
+
+def test_to_approval_reads_the_decision_payload() -> None:
+    parsed = to_approval({"approved": True, "actor": "oncall", "comment": "ok"})
+    assert (parsed.approved, parsed.actor, parsed.comment) == (True, "oncall", "ok")
+    # A malformed resume value is a rejection, never an implicit approval.
+    assert to_approval(None).approved is False
+    assert to_approval({}).approved is False
+    assert to_approval({"approved": True}).actor == "unknown"
+
+
+def test_auto_approval_names_itself() -> None:
+    approval = AutoApprovalGateway().await_decision(incident_id="i", plan=None)  # type: ignore[arg-type]
+
+    assert approval.approved is True
+    assert approval.actor == "auto"
+    assert "APPROVAL_MODE=approved" in approval.comment
+
+
+# --- execution through the port --------------------------------------------
+
+
+async def test_execute_uses_the_injected_executor(
+    state: dict, plan: RemediationPlan, executor: Any
+) -> None:
+    state["plan"] = plan
+    state["approvals"] = [Approval(approved=True, actor="oncall")]
+    deps = CoreDeps(approval=ExplodingGateway(), dry_run=False, executor=executor)
+
+    result = await nodes.execute(state, deps)
+
+    assert result["phase"] == Phase.EXECUTING
+    assert executor.steps == list(plan.steps)
+    assert [action.executed for action in result["actions"]] == [True]
+
+
+# --- investigation without the environment ---------------------------------
+
+
+async def test_investigate_degrades_without_a_telemetry_source(state: dict) -> None:
+    deps = CoreDeps(approval=ExplodingGateway(), dynatrace_configured=False)
+
+    result = await nodes.investigate(state, deps)
+
+    assert result["investigation_attempts"] == 1
+    assert "not configured" in result["evidence"][0].summary
+
+
+# --- run policy ------------------------------------------------------------
+
+
+def test_run_limits_round_trip_through_the_workflow_input() -> None:
+    limits = RunLimits(max_investigation_attempts=5, max_remediation_attempts=1)
+    payload = limits.as_workflow_input()
+
+    assert payload == {"max_investigation_attempts": 5, "max_remediation_attempts": 1}
+    assert RunLimits.from_workflow_input(payload) == limits
+
+
+def test_run_limits_fall_back_to_the_defaults() -> None:
+    limits = RunLimits.from_workflow_input(None)
+
+    assert limits.max_investigation_attempts == DEFAULT_MAX_INVESTIGATION_ATTEMPTS
+    assert limits.max_remediation_attempts == DEFAULT_MAX_REMEDIATION_ATTEMPTS
+
+
+# --- composition root ------------------------------------------------------
+
+
+def test_build_deps_picks_the_approval_channel_from_settings() -> None:
+    human = build_deps(Settings(approval_mode="human"))
+    auto = build_deps(Settings(approval_mode="approved"))
+
+    assert isinstance(human.approval, GraphApprovalGateway)
+    assert isinstance(auto.approval, AutoApprovalGateway)
+
+
+def test_build_deps_carries_the_policy_and_wires_no_executor() -> None:
+    settings = Settings(
+        dry_run=True,
+        dynatrace_env_url="https://example.live.dynatrace.com",
+        dynatrace_read_token="read-token",
+    )
+
+    deps = build_deps(settings)
+
+    assert deps.dry_run is True
+    assert deps.dynatrace_configured is True
+    # Remediation stays unavailable until a sandbox executor exists.
+    assert deps.executor is None
+
+
+def test_build_app_does_not_read_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden() -> None:
+        raise AssertionError("build_app receives its settings; it must not read them")
+
+    monkeypatch.setattr("kestrel.worker.get_settings", forbidden)
+
+    app = build_app(Settings())
+
+    for name in NODE_FUNCTIONS:
+        assert name in app.nodes
+
+
+def test_build_app_wraps_the_nodes_when_tracing_is_configured() -> None:
+    app = build_app(Settings(langfuse_public_key="pk-test", langfuse_secret_key="sk-test"))
+
+    for name in NODE_FUNCTIONS:
+        assert name in app.nodes
