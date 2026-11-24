@@ -199,7 +199,7 @@ async def test_dynatrace_transport_failure_becomes_the_port_error() -> None:
     adapter = dynatrace_provider.DynatraceTelemetryProvider(classic=client)
 
     with pytest.raises(TelemetryUnavailable) as raised:
-        await adapter.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+        await adapter.investigate(Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope())
 
     assert raised.value.provider_id == "dynatrace"
 
@@ -327,7 +327,7 @@ async def test_platform_investigation_returns_an_alert_and_a_log() -> None:
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
     found = await provider.investigate(
-        Incident(id="P-1", title="checkout slow"), InvestigationScope()
+        Incident(id="P-1", title="checkout slow", affected_entities=["lounge-manager"]), InvestigationScope()
     )
 
     assert [item.kind for item in found] == [EvidenceKind.ALERT, EvidenceKind.LOG]
@@ -343,7 +343,7 @@ async def test_platform_evidence_payload_is_projected_and_small() -> None:
     platform = FakePlatformClient(logs=[_real_log_record(content=long_content)])
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
-    found = await provider.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+    found = await provider.investigate(Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope())
 
     payload = found[0].payload
     assert set(payload) == {"timestamp", "loglevel", "service.name", "content"}
@@ -359,6 +359,7 @@ async def test_platform_investigation_floors_the_window_of_a_stale_incident() ->
     stale = Incident(
         id="P-1",
         title="old",
+        affected_entities=["lounge-manager"],
         started_at=datetime.now(UTC) - timedelta(hours=48),
     )
 
@@ -377,7 +378,7 @@ async def test_platform_investigation_applies_the_run_scope() -> None:
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
     found = await provider.investigate(
-        Incident(id="P-1", title="t"), InvestigationScope(tags=("customer-experience",))
+        Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope(tags=("customer-experience",))
     )
 
     # Filtered, not empty: the run must be able to tell the two apart.
@@ -391,7 +392,7 @@ async def test_platform_scope_matches_a_semantic_attribute() -> None:
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
     found = await provider.investigate(
-        Incident(id="P-1", title="t"), InvestigationScope(tags=("customer-experience",))
+        Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope(tags=("customer-experience",))
     )
 
     assert len(found) == 1
@@ -405,7 +406,7 @@ async def test_total_platform_failure_is_a_provider_outage() -> None:
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
     with pytest.raises(TelemetryUnavailable) as raised:
-        await provider.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+        await provider.investigate(Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope())
 
     assert "403" in str(raised.value)
 
@@ -419,7 +420,7 @@ async def test_a_partial_platform_failure_keeps_the_evidence_and_records_a_note(
     )
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
-    found = await provider.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+    found = await provider.investigate(Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope())
 
     kinds = [item.kind for item in found]
     assert EvidenceKind.LOG in kinds
@@ -435,7 +436,7 @@ async def test_the_provider_prefers_the_platform_surface() -> None:
         platform=platform, classic=classic
     )
 
-    await provider.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+    await provider.investigate(Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope())
 
     assert classic.asked == []
     assert platform.queries
@@ -448,9 +449,77 @@ async def test_a_fresh_incident_investigates_a_window_with_context() -> None:
     platform = FakePlatformClient()
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
-    await provider.investigate(Incident(id="P-1", title="fresh"), InvestigationScope())
+    await provider.investigate(Incident(id="P-1", title="fresh", affected_entities=["lounge-manager"]), InvestigationScope())
 
     start = datetime.fromisoformat(platform.queries[0]["start"])
     end = datetime.fromisoformat(platform.queries[0]["end"])
     assert end - start > timedelta(minutes=29)
     assert end - start < timedelta(minutes=31)
+
+
+# --- the query is scoped to the incident, or there is no query -------------
+
+
+async def test_an_incident_without_a_target_reads_nothing() -> None:
+    """The defect this pins: reading the tenant-wide error stream as "evidence"."""
+    platform = FakePlatformClient(logs=[_real_log_record()])
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(Incident(id="P-1", title="nothing"), InvestigationScope())
+
+    assert platform.queries == []
+    assert [item.kind for item in found] == [EvidenceKind.NOTE]
+    assert "no investigation target" in found[0].summary
+
+
+async def test_the_log_query_joins_on_the_entity_id() -> None:
+    platform = FakePlatformClient()
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    await provider.investigate(
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-30CF729466F91717"]),
+        InvestigationScope(),
+    )
+
+    logs_query = next(q["query"] for q in platform.queries if q["kind"] == "logs")
+    assert 'dt.entity.service == "SERVICE-30CF729466F91717"' in logs_query
+    assert 'loglevel == "ERROR"' in logs_query
+
+
+async def test_the_log_query_falls_back_to_the_service_name() -> None:
+    platform = FakePlatformClient()
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    await provider.investigate(
+        Incident(id="P-1", title="t", affected_entities=["order-handler"]), InvestigationScope()
+    )
+
+    logs_query = next(q["query"] for q in platform.queries if q["kind"] == "logs")
+    assert 'service.name == "order-handler"' in logs_query
+
+
+async def test_the_environment_guardrail_is_appended() -> None:
+    platform = FakePlatformClient()
+    provider = dynatrace_provider.DynatraceTelemetryProvider(  # type: ignore[arg-type]
+        platform=platform, environment="prod"
+    )
+
+    await provider.investigate(
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-1"]), InvestigationScope()
+    )
+
+    logs_query = next(q["query"] for q in platform.queries if q["kind"] == "logs")
+    assert 'deployment.environment.name == "prod"' in logs_query
+
+
+async def test_an_entity_name_cannot_break_out_of_the_dql_literal() -> None:
+    platform = FakePlatformClient()
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    await provider.investigate(
+        Incident(id="P-1", title="t", affected_entities=['evil" or true or "']),
+        InvestigationScope(),
+    )
+
+    logs_query = next(q["query"] for q in platform.queries if q["kind"] == "logs")
+    assert 'service.name == "evil\\" or true or \\""' in logs_query

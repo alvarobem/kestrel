@@ -68,7 +68,12 @@ class Incident(BaseModel):
     status: IncidentStatus = IncidentStatus.OPEN
     started_at: datetime = Field(default_factory=_now)
     detected_at: datetime = Field(default_factory=_now)
+    #: Human-facing names of the affected entities.
     affected_entities: list[str] = Field(default_factory=list)
+    #: Provider-side ids of those entities (`SERVICE-…`). This is the only
+    #: reliable join key for reading telemetry about *this* incident: names are
+    #: display strings and repeat across a tenant.
+    entity_ids: list[str] = Field(default_factory=list)
     management_zones: list[str] = Field(default_factory=list)
     tags: dict[str, str] = Field(default_factory=dict)
     raw: dict = Field(default_factory=dict)

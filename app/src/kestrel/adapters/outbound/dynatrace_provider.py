@@ -45,10 +45,12 @@ _DAVIS_DQL = (
     "| fields timestamp, davis.title, davis.status | sort timestamp desc | limit {limit}"
 )
 
-#: Error logs, newest first. Every field here appeared in a real record from the
-#: tenant (`loglevel`, `content`, `service.name`, `trace_id`, `timestamp`).
-_ERROR_LOGS_DQL = (
-    'fetch logs | filter loglevel == "ERROR" '
+#: Error logs, newest first, **scoped to the incident**. The `{filters}` part is
+#: built per incident: without a target there is no query at all (see
+#: `_log_dql`). Every projected field was observed in a real record from the
+#: tenant.
+_LOG_DQL = (
+    "fetch logs | filter {filters} "
     "| fields timestamp, content, loglevel, service.name, trace_id "
     "| sort timestamp desc | limit {limit}"
 )
@@ -94,7 +96,11 @@ def build(settings: Settings) -> DynatraceTelemetryProvider | None:
     classic = DynatraceClient(settings) if configured(settings) else None
     if platform is None and classic is None:
         return None
-    return DynatraceTelemetryProvider(platform=platform, classic=classic)
+    return DynatraceTelemetryProvider(
+        platform=platform,
+        classic=classic,
+        environment=settings.dynatrace_environment or None,
+    )
 
 
 def describe(settings: Settings) -> tuple[bool, list[str]]:
@@ -159,10 +165,13 @@ class DynatraceTelemetryProvider:
         *,
         platform: DynatracePlatformClient | None = None,
         classic: DynatraceClient | None = None,
+        environment: str | None = None,
         lookback: str = "now-2h",
     ) -> None:
         self._platform = platform
         self._classic = classic
+        #: Optional second guardrail: pin the environment the run may read.
+        self._environment = environment
         self._lookback = lookback
 
     async def investigate(
@@ -188,13 +197,31 @@ class DynatraceTelemetryProvider:
         incident: Incident,
         scope: InvestigationScope,
     ) -> list[Evidence]:
+        targets = _target_conditions(incident)
+        if not targets:
+            # Fail closed. Reading the tenant-wide error stream and calling it
+            # "evidence for this incident" is worse than reading nothing: it looks
+            # like an investigation and it is noise from other teams.
+            return [
+                Evidence(
+                    provider=PROVIDER_ID,
+                    kind=EvidenceKind.NOTE,
+                    summary=(
+                        "no investigation target: the incident carries no entity id or service "
+                        "name, so no tenant-wide query was made"
+                    ),
+                    confidence=0.0,
+                )
+            ]
+
         start, end = _window(incident)
+        logs_dql = _log_dql(targets, self._environment, _MAX_LOGS)
 
         problems, problem_error = await asyncio.to_thread(
             _query, platform, _DAVIS_DQL.format(limit=_MAX_PROBLEMS), start, end, _MAX_PROBLEMS
         )
         logs, log_error = await asyncio.to_thread(
-            _query, platform, _ERROR_LOGS_DQL.format(limit=_MAX_LOGS), start, end, _MAX_LOGS
+            _query, platform, logs_dql, start, end, _MAX_LOGS
         )
 
         evidence: list[Evidence] = []
@@ -295,6 +322,40 @@ def _window(incident: Incident) -> tuple[str, str]:
         started = started.replace(tzinfo=UTC)
     start = max(min(started, now) - _CONTEXT_BEFORE, now - _MAX_WINDOW)
     return start.isoformat(), now.isoformat()
+
+
+def _target_conditions(incident: Incident) -> list[str]:
+    """How this incident is joined to telemetry: by entity id first, then name.
+
+    An entity id (`SERVICE-30CF729466F91717`) is stable and unique; a service name
+    is a display string. Both are accepted because not every producer emits an id,
+    but the id is what the query leans on when it exists.
+    """
+    conditions = [
+        f"dt.entity.service == {_dql_string(entity_id)}"
+        for entity_id in incident.entity_ids
+        if entity_id
+    ]
+    conditions.extend(
+        f"service.name == {_dql_string(name)}"
+        for name in incident.affected_entities
+        if name
+    )
+    return conditions
+
+
+def _dql_string(value: str) -> str:
+    """A DQL string literal. Quotes and backslashes are escaped, not trusted."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _log_dql(targets: list[str], environment: str | None, limit: int) -> str:
+    """The error-log query, scoped to this incident and optionally to one environment."""
+    clauses = ['loglevel == "ERROR"', f"({' or '.join(targets)})"]
+    if environment:
+        clauses.append(f"deployment.environment.name == {_dql_string(environment)}")
+    return _LOG_DQL.format(filters=" and ".join(clauses), limit=limit)
 
 
 def _record_scope_candidates(record: dict) -> list[str]:

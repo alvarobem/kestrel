@@ -53,6 +53,11 @@ is deleted, not fixed in place. DQL lives in one module.
 `AGENTS.md`, `docs/PROJECT.md` §12, `.env.example` and `docker-compose.yml` describe the two surfaces.
 `make test` and `make lint` pass; a live `make provider-check` against the tenant is the closing evidence.
 
+**S10 — The investigation is scoped to the incident, or it does not run.**
+Acceptance: the log query joins on the incident's entity ids (`dt.entity.service`, falling back to
+`service.name`) and optionally on `DYNATRACE_ENVIRONMENT`; an incident with no entity id and no service
+name triggers **no query** and records why. Reading the tenant-wide error stream is never evidence.
+
 ## Out of scope, stated on purpose
 
 Metrics and per-service log filtering. A wrong metric selector returns an empty result silently, and the
@@ -71,6 +76,7 @@ empty. They land in the next slice once we have seen the tenant's metric catalog
 | T6 | S9 | Tests with the tenant's real response shape + polling/limits failures | inline | done |
 | T7 | S9 | `.env.example`, compose, `AGENTS.md`, `docs/PROJECT.md` | inline | done |
 | T8 | S9 | Live run: `provider-check` + `smoke` with the real platform token | inline | done |
+| T9 | S10 | Scope the log query to the incident's entities + environment, fail closed without one | inline | done |
 
 ## Log
 
@@ -141,6 +147,30 @@ run must not depend on which machine it runs on.
 
 Both are pinned: one test asserts a fresh incident investigates a non-empty window, and one asserts a
 fully-filtered result yields an explicit scope note rather than an empty list.
+
+**L9 — the defect the operator caught: tenant-wide noise.**
+The first version filtered only `loglevel == "ERROR"` and the time window, then took the 12 most recent
+matches **of the whole tenant**. In a tenant with dozens of services (one writing 10.6M logs) that is
+random traffic from other teams, presented as evidence for one incident. The operator saw it immediately
+and was right.
+
+Root cause, verified in the code: the webhook payload carries
+`affectedEntities[].entityId.id` (for example `SERVICE-30CF729466F91717`) and the inbound ACL threw it
+away unless the display name was missing, so the investigation had nothing to join on.
+
+Fixed:
+- `Incident.entity_ids` keeps the provider-side id, and the ACL fills it separately from the names.
+- The log query becomes `loglevel == "ERROR" and (dt.entity.service == "…" or service.name == "…")`,
+  with `deployment.environment.name` pinned when `DYNATRACE_ENVIRONMENT` is set.
+- **No target means no query.** The provider returns a `NOTE` explaining it. Fail closed, like `execute`
+  does when no executor is wired.
+- DQL literals escape quotes and backslashes: a service name is telemetry data, not a trusted string.
+
+Live proof, same tenant, same window:
+- before: 12 logs mixed across `order-handler`, `lounge-manager`, `java-micronaut`;
+- after `POST /incidents/webhook/dynatrace` with `entityId.id = SERVICE-30CF729466F91717`:
+  **12 logs, all `order-handler`**, each with its `trace_id`.
+`provider-check` still queries wide on purpose: it is a diagnostic, not an investigation.
 
 **L8 — pending mirror.**
 Engram is unavailable in this session (`could not resolve an authoritative OpenCode runtime session`), so

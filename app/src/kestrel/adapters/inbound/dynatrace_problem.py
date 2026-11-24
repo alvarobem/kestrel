@@ -38,10 +38,16 @@ def parse_dynatrace_timestamp(value: str | None) -> datetime:
 def problem_to_incident(problem: dict) -> Incident:
     """Map a Dynatrace problem payload onto our normalized incident."""
     affected: list[str] = []
+    entity_ids: list[str] = []
     for entity in problem.get("affectedEntities", []) or []:
-        name = entity.get("name") or entity.get("entityId", {}).get("id")
+        if not isinstance(entity, dict):
+            continue
+        name = entity.get("name")
         if name:
             affected.append(name)
+        entity_id = (entity.get("entityId") or {}).get("id")
+        if entity_id:
+            entity_ids.append(entity_id)
 
     status = IncidentStatus.OPEN if problem.get("status") == "OPEN" else IncidentStatus.CLOSED
 
@@ -55,6 +61,8 @@ def problem_to_incident(problem: dict) -> Incident:
         status=status,
         started_at=parse_dynatrace_timestamp(problem.get("startTime")),
         affected_entities=affected,
+        # Kept separately on purpose: it is the key the investigation filters on.
+        entity_ids=entity_ids,
         management_zones=[
             zone.get("name", "")
             for zone in problem.get("managementZones", []) or []

@@ -273,9 +273,18 @@ reaches the core.
 Investigation **prefers the platform surface**, because it is the only one that
 can read Grail, and Grail is where the evidence is: the Davis problem that fired
 (`fetch events | filter event.type == "davis"`) and the error logs the service is
-writing (`fetch logs | filter loglevel == "ERROR"`). The classic surface remains
-as a fallback for a tenant that only has an API token, where the incident's own
-problem record is reported as one `ALERT`.
+writing. The classic surface remains as a fallback for a tenant that only has an
+API token, where the incident's own problem record is reported as one `ALERT`.
+
+**The log query is scoped to the incident, or it does not run.** It joins on the
+entity id the webhook carries (`dt.entity.service == "SERVICE-…"`, falling back to
+`service.name`) and, when `DYNATRACE_ENVIRONMENT` is set, pins
+`deployment.environment.name`. An incident with no entity id and no service name
+produces **no query at all** and records why: reading a tenant's whole error stream
+and calling it evidence for one incident is noise from other teams wearing a
+report's clothes. That is a real defect this prototype shipped once — the plan is
+built from evidence, so unrelated evidence is a wrong remediation waiting to be
+proposed.
 
 Two traps worth knowing, both learned against a live tenant:
 

@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # anything that still speaks API v2.
     dynatrace_platform_url: str | None = None
     dynatrace_platform_token: str | None = None
+    #: Second guardrail for the investigation: pin the environment this prototype
+    #: may read (`prod`, `staging`). Empty means no environment filter.
+    dynatrace_environment: str | None = None
 
     max_investigation_attempts: int = DEFAULT_MAX_INVESTIGATION_ATTEMPTS
     max_remediation_attempts: int = DEFAULT_MAX_REMEDIATION_ATTEMPTS

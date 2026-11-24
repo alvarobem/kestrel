@@ -38,6 +38,7 @@ x-agent-env: &agent-env
   # scopes only (storage:*:read); never automation or ingest scopes.
   DYNATRACE_PLATFORM_URL: ${DYNATRACE_PLATFORM_URL:-}
   DYNATRACE_PLATFORM_TOKEN: ${DYNATRACE_PLATFORM_TOKEN:-}
+  DYNATRACE_ENVIRONMENT: ${DYNATRACE_ENVIRONMENT:-}
   DYNATRACE_ENV_URL: ${DYNATRACE_ENV_URL:-}
   DYNATRACE_READ_TOKEN: ${DYNATRACE_READ_TOKEN:-}
   # DYNATRACE_WRITE_TOKEN is deliberately not injected here: no agent code path
