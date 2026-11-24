@@ -396,6 +396,14 @@ relative time ("yesterday") is kept in the description and never converted to a
 timestamp: the investigation window stays bounded to the last 6 hours, so a
 report about yesterday reads the same window any other incident would.
 
+The report itself is bounded too, and refused rather than truncated past
+`MAX_REPORT_CHARS` (4000): the sentence is durable state, re-serialized on every
+transition, so a pasted log dump is a payload problem wearing a report's clothes.
+`make report MSG="…"` passes the sentence through unexpanded and single-quoted —
+make would otherwise expand `$(…)` inside it and the shell would re-split its
+quotes, and because the words are the incident's identity, a rewritten sentence
+starts a run for a report nobody wrote.
+
 **Scoping.** `DYNATRACE_SCOPE_TAGS` narrows investigation to the tags/management
 zones this prototype may reason about. It is frozen into `CoreDeps` as an
 `InvestigationScope` when the run starts, and the provider returns no evidence

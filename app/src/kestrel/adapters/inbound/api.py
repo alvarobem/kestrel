@@ -36,7 +36,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError, field_validator
 
-from kestrel.adapters.inbound.natural_language import incident_from_text
+from kestrel.adapters.inbound.natural_language import incident_from_text, normalized_report
 from kestrel.adapters.inbound.webhooks import UnknownIncidentProvider, incident_from_payload
 from kestrel.adapters.outbound.runs import TemporalRunGateway
 from kestrel.application.errors import (
@@ -87,8 +87,10 @@ class ResumeRequest(BaseModel):
 class NaturalReportRequest(BaseModel):
     """One sentence a person typed, plus an optional explicit identity.
 
-    The text is normalized here because a report of blanks is not a report, and a
-    trailing newline must not become a second incident.
+    The text is normalized and bounded by the report contract itself
+    (`natural_language.normalized_report`), so a report of blanks is a 422 and a
+    pasted log dump is refused with the limit in the message instead of bloating
+    workflow history.
     """
 
     text: str
@@ -99,10 +101,7 @@ class NaturalReportRequest(BaseModel):
     @field_validator("text")
     @classmethod
     def _needs_words(cls, value: str) -> str:
-        words = " ".join(value.split())
-        if not words:
-            raise ValueError("a report needs some words")
-        return words
+        return normalized_report(value)
 
 
 def _runs(request: Request) -> RunGateway:

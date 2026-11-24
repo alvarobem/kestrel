@@ -228,23 +228,28 @@ async def _explain_no_approval(runs: TemporalRunGateway, incident_id: str) -> in
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kestrel")
-    parser.add_argument(
-        "command",
-        choices=["provider-check", "llm-check", "llm-login", "smoke", "report", "dynatrace-check"],
-        help="`dynatrace-check` is a deprecated alias of `provider-check`",
-    )
-    parser.add_argument(
-        "text",
-        nargs="?",
-        default="",
-        help="`report`: the sentence describing the incident, in your own words",
-    )
-    parser.add_argument(
+    # One subcommand per verb, so a sentence is only accepted where it means
+    # something. As a global positional it was silently swallowed by every other
+    # verb — `kestrel smoke someword` used to be an argparse error and became a
+    # run with the word dropped.
+    commands = parser.add_subparsers(dest="command", required=True, metavar="command")
+    for name, summary in (
+        ("provider-check", "prove the active telemetry provider can be read"),
+        ("llm-check", "prove the configured model answers"),
+        ("llm-login", "authorize the LLM seat once, for this machine"),
+        ("smoke", "start a run, approve it and print the report"),
+        ("dynatrace-check", "deprecated alias of provider-check"),
+    ):
+        commands.add_parser(name, help=summary)
+    report = commands.add_parser("report", help="start a run from a sentence a person typed")
+    report.add_argument("text", help="the sentence describing the incident, in your own words")
+    report.add_argument(
         "--id",
         dest="incident_id",
         default=None,
-        help="`report`: explicit incident id (default: derived from the sentence)",
+        help="explicit incident id (default: derived from the sentence)",
     )
+
     args = parser.parse_args(argv)
     settings = get_settings()
     logging.basicConfig(level=settings.log_level.upper())

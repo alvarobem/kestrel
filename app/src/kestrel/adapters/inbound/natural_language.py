@@ -26,6 +26,30 @@ from kestrel.domain.models import Incident
 #: what a human reads. The whole sentence stays in `description` and `raw`.
 _TITLE_LIMIT = 140
 
+#: A report is a sentence or two. The text travels into workflow history and is
+#: re-serialized on every state transition, so an unbounded paste is a payload
+#: problem wearing a feature's clothes: it is refused at the door with a message
+#: instead of failing later inside the engine, where nobody would know why.
+MAX_REPORT_CHARS = 4000
+
+
+def normalized_report(text: str) -> str:
+    """The words of a report, or a `ValueError` naming what is wrong with it.
+
+    One rule, called by every surface: the HTTP model, the CLI verb and the
+    mapper below. Whitespace is collapsed because a trailing newline is not a
+    second incident, and the length is bounded because the sentence is durable.
+    """
+    words = " ".join(text.split())
+    if not words:
+        raise ValueError("a report needs some words")
+    if len(words) > MAX_REPORT_CHARS:
+        raise ValueError(
+            f"the report is {len(words)} characters; the limit is {MAX_REPORT_CHARS}. "
+            "Report the symptom and the service — a full log dump belongs in the ticketing tool"
+        )
+    return words
+
 
 def incident_from_text(text: str, incident_id: str | None = None) -> Incident:
     """One sentence, one incident.
@@ -34,9 +58,7 @@ def incident_from_text(text: str, incident_id: str | None = None) -> Incident:
     second run of the same words — a re-report the day after. Without it, the same
     sentence is the same incident, which is what makes submission idempotent.
     """
-    words = " ".join(text.split())
-    if not words:
-        raise ValueError("an empty report is not an incident")
+    words = normalized_report(text)
     return Incident(
         id=incident_id or natural_incident_id(words),
         # Provenance, not the tool the run investigates with. Together with

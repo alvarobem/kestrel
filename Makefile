@@ -14,6 +14,15 @@ NO_TRACING = LANGFUSE_BASE_URL= LANGFUSE_PUBLIC_KEY= LANGFUSE_SECRET_KEY=
 MOUNT_SRC_RO = -v "$(CURDIR)/app/src:/app/src:ro" -v "$(CURDIR)/app/tests:/app/tests:ro"
 MOUNT_SRC_RW = -v "$(CURDIR)/app/src:/app/src" -v "$(CURDIR)/app/tests:/app/tests"
 
+# `report` takes a whole sentence, and both make and the shell would rewrite it:
+# make expands `$(...)`/`${...}` inside a recipe, and the shell expands quotes,
+# backticks and `$` in a double-quoted word. So the value is read unexpanded
+# (`$(value MSG)`) with every `'` escaped for the single-quoted word the recipe
+# uses. Without both, `make report MSG='$(id)'` runs a command on the host and a
+# plain `"` silently changes the sentence — which, because the sentence is the
+# incident identity, starts a run for a report nobody typed.
+REPORT_TEXT = $(subst ','\'',$(value MSG))
+
 .DEFAULT_GOAL := help
 
 .PHONY: help init up up-all down reset logs ps temporal smoke report test lint fmt sandbox psql redis-cli provider-check llm-login llm-check dynatrace-check
@@ -61,8 +70,8 @@ smoke: ## Full run against the local stack: start incident, approve, report
 	$(COMPOSE) exec $(SERVICE) python -m kestrel.adapters.inbound.cli smoke
 
 report: ## Start a run from a sentence: make report MSG="java-micronaut would not start"
-	@test -n "$(MSG)" || (echo 'usage: make report MSG="what happened, in your own words"' && exit 1)
-	$(COMPOSE) exec $(SERVICE) python -m kestrel.adapters.inbound.cli report "$(MSG)"
+	@test -n '$(REPORT_TEXT)' || (echo 'usage: make report MSG="what happened, in your own words"' && exit 1)
+	$(COMPOSE) exec $(SERVICE) python -m kestrel.adapters.inbound.cli report '$(REPORT_TEXT)'
 
 test: ## Run the test suite against the working tree (works with the stack stopped)
 	$(NO_TRACING) $(COMPOSE) run --rm --no-deps $(MOUNT_SRC_RO) agent-worker pytest -q

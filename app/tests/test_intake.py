@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from kestrel.adapters.inbound.natural_language import incident_from_text
+from kestrel.adapters.inbound.natural_language import MAX_REPORT_CHARS, incident_from_text
 from kestrel.application import nodes
 from kestrel.application.deps import CoreDeps
 from kestrel.application.errors import IntakeUnusable, LlmUnavailable
@@ -82,6 +82,17 @@ def test_an_explicit_id_wins_over_the_derived_one() -> None:
 def test_an_empty_report_is_not_an_incident() -> None:
     with pytest.raises(ValueError):
         incident_from_text("  \n ")
+
+
+def test_an_over_long_report_is_refused_before_it_becomes_state() -> None:
+    """The sentence is re-serialized on every transition, so it has a ceiling."""
+    with pytest.raises(ValueError) as excinfo:
+        incident_from_text("x" * (MAX_REPORT_CHARS + 1))
+
+    assert str(MAX_REPORT_CHARS) in str(excinfo.value)
+    # Whitespace does not buy room: the limit is on the normalized words.
+    longest_ok = incident_from_text("a " * (MAX_REPORT_CHARS // 2 - 1) + "a")
+    assert len(longest_ok.description) <= MAX_REPORT_CHARS
 
 
 # --- the model's reading is normalized, not trusted -------------------------

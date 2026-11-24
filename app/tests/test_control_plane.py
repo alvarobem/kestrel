@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from kestrel.adapters.inbound import cli
 from kestrel.adapters.inbound.api import app
 from kestrel.application.errors import (
     IncidentAlreadyRunning,
@@ -260,6 +261,29 @@ def test_api_refuses_a_report_without_words(gateway: FakeRunGateway) -> None:
 
     assert response.status_code == 422
     assert gateway.started == []
+
+
+def test_api_refuses_a_report_that_is_not_a_sentence(gateway: FakeRunGateway) -> None:
+    """The sentence is durable state, so it has a ceiling and the refusal says so."""
+    with TestClient(app) as client:
+        app.state.runs = gateway
+        response = client.post("/incidents/natural", json={"text": "x" * 4001})
+
+    assert response.status_code == 422
+    assert "limit is 4000" in response.text
+    assert gateway.started == []
+
+
+def test_the_cli_still_rejects_a_sentence_where_it_means_nothing() -> None:
+    """Only `report` takes words: `smoke someword` is an error, as it was before."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["smoke", "someword"])
+
+    assert excinfo.value.code == 2
+
+
+def test_the_cli_refuses_a_report_with_no_words() -> None:
+    assert cli.main(["report", "   ", "--id", "PD-1"]) == 2
 
 
 # --- webhook ingestion is per provider -------------------------------------
