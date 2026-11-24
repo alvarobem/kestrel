@@ -278,13 +278,21 @@ API token, where the incident's own problem record is reported as one `ALERT`.
 
 **The log query is scoped to the incident, or it does not run.** It joins on the
 entity id the webhook carries (`dt.entity.service == "SERVICE-…"`, falling back to
-`service.name`) and, when `DYNATRACE_ENVIRONMENT` is set, pins
-`deployment.environment.name`. An incident with no entity id and no service name
-produces **no query at all** and records why: reading a tenant's whole error stream
-and calling it evidence for one incident is noise from other teams wearing a
-report's clothes. That is a real defect this prototype shipped once — the plan is
-built from evidence, so unrelated evidence is a wrong remediation waiting to be
-proposed.
+`service.name`). An incident with no entity id and no service name produces **no
+query at all** and records why: reading a tenant's whole error stream and calling it
+evidence for one incident is noise from other teams wearing a report's clothes.
+That is a real defect this prototype shipped once — the plan is built from
+evidence, so unrelated evidence is a wrong remediation waiting to be proposed.
+
+**Environment is not a global setting, and must not become one.** A Dynatrace
+entity id (`SERVICE-30CF729466F91717`) exists in exactly one environment, so the
+incident itself carries the environment: the same agent investigates an incident
+from prod, pre or staging with no configuration change, which is the point — this
+is not only an on-call tool. `DYNATRACE_ENVIRONMENT` exists only to *narrow* a
+deployment that must be restricted; pinning it to `prod` would make every
+staging incident uninspectable. When an incident only carries a service name (no
+entity id), the environment is not implied, and the evidence says so: a name can
+match prod and pre at once.
 
 Two traps worth knowing, both learned against a live tenant:
 

@@ -68,8 +68,10 @@ class Settings(BaseSettings):
     # anything that still speaks API v2.
     dynatrace_platform_url: str | None = None
     dynatrace_platform_token: str | None = None
-    #: Second guardrail for the investigation: pin the environment this prototype
-    #: may read (`prod`, `staging`). Empty means no environment filter.
+    #: Optional narrowing, NOT a requirement. The real environment scope is the
+    #: incident's own entity id: `SERVICE-…` exists in exactly one environment, so
+    #: the same agent can investigate prod, staging or pre without being pinned to
+    #: one. Set this only on a deployment that is deliberately restricted.
     dynatrace_environment: str | None = None
 
     max_investigation_attempts: int = DEFAULT_MAX_INVESTIGATION_ATTEMPTS

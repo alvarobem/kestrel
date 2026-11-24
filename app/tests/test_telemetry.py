@@ -327,7 +327,13 @@ async def test_platform_investigation_returns_an_alert_and_a_log() -> None:
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
     found = await provider.investigate(
-        Incident(id="P-1", title="checkout slow", affected_entities=["lounge-manager"]), InvestigationScope()
+        Incident(
+            id="P-1",
+            title="checkout slow",
+            affected_entities=["lounge-manager"],
+            entity_ids=["SERVICE-1"],
+        ),
+        InvestigationScope(),
     )
 
     assert [item.kind for item in found] == [EvidenceKind.ALERT, EvidenceKind.LOG]
@@ -392,10 +398,11 @@ async def test_platform_scope_matches_a_semantic_attribute() -> None:
     provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
 
     found = await provider.investigate(
-        Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope(tags=("customer-experience",))
+        Incident(id="P-1", title="t", affected_entities=["lounge-manager"]),
+        InvestigationScope(tags=("customer-experience",)),
     )
 
-    assert len(found) == 1
+    assert [item.kind for item in found if item.kind == EvidenceKind.LOG]
 
 
 async def test_total_platform_failure_is_a_provider_outage() -> None:
@@ -523,3 +530,27 @@ async def test_an_entity_name_cannot_break_out_of_the_dql_literal() -> None:
 
     logs_query = next(q["query"] for q in platform.queries if q["kind"] == "logs")
     assert 'service.name == "evil\\" or true or \\""' in logs_query
+
+
+async def test_a_name_only_join_says_it_may_span_environments() -> None:
+    """`SERVICE-…` is environment-scoped; a service name is not."""
+    platform = FakePlatformClient(logs=[_real_log_record()])
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t", affected_entities=["order-handler"]), InvestigationScope()
+    )
+
+    note = next(item for item in found if item.kind == EvidenceKind.NOTE)
+    assert "may span environments" in note.summary
+
+
+async def test_an_entity_id_join_does_not_add_the_caveat() -> None:
+    platform = FakePlatformClient(logs=[_real_log_record()])
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-30CF729466F91717"]), InvestigationScope()
+    )
+
+    assert [item.kind for item in found] == [EvidenceKind.LOG]

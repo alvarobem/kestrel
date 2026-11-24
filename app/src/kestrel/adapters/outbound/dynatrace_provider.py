@@ -268,6 +268,23 @@ class DynatraceTelemetryProvider:
                         confidence=0.0,
                     )
                 )
+
+        if evidence and not incident.entity_ids:
+            # A service name is not environment-scoped: the same name exists in
+            # prod and in pre, and a single Dynatrace tenant holds them all. Say
+            # so in the evidence instead of letting the report imply a precision
+            # the join does not have.
+            notes.append(
+                Evidence(
+                    provider=PROVIDER_ID,
+                    kind=EvidenceKind.NOTE,
+                    summary=(
+                        "matched by service name only (the incident carries no entity id): "
+                        "the evidence may span environments"
+                    ),
+                    confidence=0.0,
+                )
+            )
         return [*evidence, *notes]
 
     # --- classic API v2: the fallback --------------------------------------
