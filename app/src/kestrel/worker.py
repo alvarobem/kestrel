@@ -32,7 +32,7 @@ from kestrel.adapters.outbound.tracing import flush_traces, trace_node
 from kestrel.application.deps import CoreDeps
 from kestrel.application.graph import GRAPH_NAME, build_graph
 from kestrel.config import Settings, get_settings
-from kestrel.domain.policy import InvestigationScope
+from kestrel.domain.policy import InvestigationScope, RemediationSurface
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,18 @@ def build_app(settings: Settings) -> StateGraph:
     """Assemble the graph the worker registers, with tracing if it is configured."""
     instrumentation = trace_node if settings.tracing_enabled else None
     return build_graph(build_deps(settings), instrumentation=instrumentation)
+
+
+def describe_surface(surface: RemediationSurface) -> str:
+    """What a plan may name, as one line for the startup log.
+
+    Extracted so it can be tested: it runs inside `main()`, and the first version
+    of it kept asking the old surface for `.tool` after the redesign, which crashed
+    the worker at boot while every unit test stayed green.
+    """
+    if not surface.declared:
+        return "undeclared"
+    return ",".join(capability.id for capability in surface.capabilities)
 
 
 async def main() -> None:
@@ -112,9 +124,7 @@ async def main() -> None:
         deps.llm is not None,
         deps.llm.model_id if deps.llm is not None else "none",
         (
-            f"{deps.surface.tool}:{deps.surface.namespace or '-'}"
-            if deps.surface.declared
-            else "undeclared"
+            describe_surface(deps.surface)
         ),
     )
 

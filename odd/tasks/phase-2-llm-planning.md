@@ -404,3 +404,34 @@ Y un segundo aprendizaje del mismo día: **un plan vacío se reintenta una vez**
 mismo prompt devolvió `steps: []` y un minuto después un plan válido, así que "sin
 pasos" no prueba que no haya nada que hacer; el reintento nombra la contradicción que
 el propio resumen ya contenía. Sigue acotado a un intento.
+
+**L18 — end-to-end completo, con plan real y aprobación humana.** Incidente
+`e2e-avios-145952` por la API contra el tenant real:
+
+```
+status: RUNNING, awaiting_approval: true
+plan: "Open a focused issue for the Avios integration failure so the owning team can
+       coordinate with the partner."  (confianza 0.62)
+  1. [agent/raise_partner_incident] gh issue create --repo ib/loyalty-platform
+     --title "Avios partner degradation — e2e-avios-145952" ...
+     rollback: gh issue close ...
+  blast_radius: "Creates one tracking issue ... it does not change the production workload."
+
+→ POST /resume {approved: true}  →  COMPLETED
+notes: dynatrace returned 6 evidence item(s) · plan proposed by github_copilot/gpt-6-luna:
+       1 step(s), hypothesis confidence=0.62 · dry run: 1 command(s) rendered, 0 left to a
+       person · verify skipped: the dry run applied nothing · report generated
+report: 7 evidence item(s), 1 action(s), resolved=False
+        root_cause = hipótesis del modelo; top_evidence = 5 líneas rankeadas con baselines
+```
+
+La cadena completa queda probada: `receive → triage(stub) → investigate(tenant real) →
+plan(modelo real + guardarraíles) → señal de aprobación → execute(dry) → verify(dry) →
+report`. `resolved=False` es correcto: un dry run no aplica nada.
+
+**L19 — el e2e encontró un bug de arranque que ningún test cubría.** La línea de log del
+worker seguía pidiendo `surface.tool`/`surface.namespace` después del rediseño a
+capacidades: `AttributeError` y worker muerto al arrancar, con 199 tests en verde. El
+workflow quedó `RUNNING` para siempre porque no había worker consumiendo la cola.
+Corregido extrayendo `describe_surface(surface)` a una función y testeándola — el log
+de arranque ahora dice `surface=restart_workload,read_workload,raise_partner_incident,rerun_pipeline`.

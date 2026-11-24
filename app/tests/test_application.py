@@ -34,9 +34,11 @@ from kestrel.domain.models import (
 from kestrel.domain.policy import (
     DEFAULT_MAX_INVESTIGATION_ATTEMPTS,
     DEFAULT_MAX_REMEDIATION_ATTEMPTS,
+    Capability,
+    RemediationSurface,
     RunLimits,
 )
-from kestrel.worker import build_app, build_deps
+from kestrel.worker import build_app, build_deps, describe_surface
 
 
 class ExplodingGateway:
@@ -180,6 +182,35 @@ async def test_a_plan_of_human_steps_needs_no_executor(state: dict) -> None:
 
     assert result["phase"] == Phase.EXECUTING
     assert [record.executed for record in result["actions"]] == [False]
+
+
+def test_the_startup_log_names_the_declared_capabilities() -> None:
+    """The log line runs once, in `main()`, where no test reaches otherwise.
+
+    It broke exactly this way: the surface was redesigned from tool+verbs to a
+    capability list, the log kept asking for `.tool`, and the worker died at boot
+    with every unit test green.
+    """
+    assert describe_surface(RemediationSurface()) == "undeclared"
+
+    declared = RemediationSurface(
+        capabilities=(
+            Capability(id="restart_workload", tool="kubectl"),
+            Capability(id="raise_partner_incident", tool="gh"),
+        )
+    )
+    assert describe_surface(declared) == "restart_workload,raise_partner_incident"
+
+
+def test_build_deps_carries_the_declared_surface() -> None:
+    settings = Settings(
+        remediation_capabilities="restart_workload|kubectl|rollout|-n checkout|change|restart one workload"
+    )
+
+    deps = build_deps(settings)
+
+    assert describe_surface(deps.surface) == "restart_workload"
+    assert deps.surface.find("restart_workload").must_contain == ("-n checkout",)
 
 
 # --- investigation without the environment ---------------------------------
