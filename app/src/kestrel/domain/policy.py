@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 DEFAULT_MAX_INVESTIGATION_ATTEMPTS = 3
 DEFAULT_MAX_REMEDIATION_ATTEMPTS = 2
@@ -74,6 +74,11 @@ class Capability:
     must_contain: tuple[str, ...] = ()
     #: When to use it, in the operator's words. Shown to the model.
     description: str = ""
+    #: What the capability does to the system. `read` exists because a verify step
+    #: after an action is legitimate; a plan made *only* of `read` steps is not,
+    #: and `require_usable` rejects it. The investigation already read the logs —
+    #: proposing to read them again would spend a human approval on a no-op.
+    effect: Literal["change", "read"] = "change"
 
     def allows_verb(self, verb: str) -> bool:
         if not self.verbs:
@@ -115,6 +120,11 @@ class RemediationSurface:
             if capability.id.strip().lower() == wanted:
                 return capability
         return None
+
+    def changes_something(self, capability_id: str | None) -> bool:
+        """Whether this capability alters the system rather than observing it."""
+        capability = self.find(capability_id or "")
+        return capability is not None and capability.effect == "change"
 
 
 @dataclass(frozen=True, slots=True)

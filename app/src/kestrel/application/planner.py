@@ -44,6 +44,10 @@ SYSTEM_PROMPT = (
     "`-A`. A plan that addresses everything is a plan nobody can review.\n"
     "- A step that cannot be undone must carry a `rollback_command`. If you cannot "
     "write the rollback, do not propose the step.\n"
+    "- The evidence is final. You cannot investigate further: the logs, events and "
+    "metrics you are given are all there is, so a step that only reads information "
+    "you already have is not a remediation and will be rejected. Every plan needs at "
+    "least one step that changes the system.\n"
     "- Never put a credential, token or password in a command.\n"
     "- Every step uses one of the capabilities declared under REMEDIATION SURFACE, "
     "sets `capability` to its id, and writes a command with that capability's tool "
@@ -152,6 +156,8 @@ def _surface_block(surface: RemediationSurface) -> list[str]:
     lines: list[str] = []
     for capability in surface.capabilities:
         line = f"- {capability.id}: tool `{capability.tool}`"
+        if capability.effect == "read":
+            line += " (read-only, allowed only next to a step that changes something)"
         if capability.verbs:
             line += f", verbs: {', '.join(capability.verbs)}"
         if capability.must_contain:
@@ -211,6 +217,15 @@ def require_usable(plan: RemediationPlan, surface: RemediationSurface) -> None:
             repairable=False,
         )
     problems = _problems(plan, surface)
+    if not problems and not any(
+        surface.changes_something(step.capability) for step in plan.steps
+    ):
+        # Structurally, not stylistically: a plan whose steps all observe is the
+        # investigation repeated, and it would spend a human approval on a no-op.
+        problems.append(
+            "the plan only reads information the investigation already gathered: "
+            "at least one step must change the system"
+        )
     if problems:
         raise PlanUnusable("; ".join(problems))
 

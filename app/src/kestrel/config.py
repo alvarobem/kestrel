@@ -100,11 +100,11 @@ class Settings(BaseSettings):
     # command" into "write a command inside this vocabulary" — and it is what lets
     # one mechanism cover a production restart and a broken build in integration.
     #
-    # Format: one capability per `;`, five `|`-separated fields,
-    #   id | tool | verbs | must_contain | description
-    # with `verbs` and `must_contain` comma-separated. Empty means undeclared,
-    # and the planner then degrades instead of guessing: an empty surface is not
-    # "anything goes".
+    # Format: one capability per `;`, six `|`-separated fields,
+    #   id | tool | verbs | must_contain | effect | description
+    # with `verbs` and `must_contain` comma-separated and `effect` one of
+    # `change` (default) or `read`. Empty means undeclared, and the planner then
+    # degrades instead of guessing: an empty surface is not "anything goes".
     remediation_capabilities: str = ""
 
     @property
@@ -151,10 +151,16 @@ def _parse_capabilities(raw: str) -> tuple[Capability, ...]:
         entry = entry.strip()
         if not entry:
             continue
-        fields = [field.strip() for field in entry.split("|", 4)]
+        fields = [field.strip() for field in entry.split("|", 5)]
         if len(fields) < 2 or not fields[0] or not fields[1]:
             raise ValueError(
                 f"REMEDIATION_CAPABILITIES entry {entry!r} must start with `id|tool`"
+            )
+        effect = fields[4] if len(fields) > 4 and fields[4] else "change"
+        if effect not in {"change", "read"}:
+            raise ValueError(
+                f"REMEDIATION_CAPABILITIES entry {entry!r} has effect {effect!r}; "
+                "use `change` or `read`"
             )
         capabilities.append(
             Capability(
@@ -162,7 +168,8 @@ def _parse_capabilities(raw: str) -> tuple[Capability, ...]:
                 tool=fields[1],
                 verbs=_csv(fields[2]) if len(fields) > 2 else (),
                 must_contain=_csv(fields[3]) if len(fields) > 3 else (),
-                description=fields[4] if len(fields) > 4 else "",
+                effect=effect,
+                description=fields[5] if len(fields) > 5 else "",
             )
         )
     return tuple(capabilities)

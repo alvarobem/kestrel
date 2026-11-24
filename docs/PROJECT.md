@@ -411,7 +411,8 @@ decision to be made together with short-lived, RBAC-scoped credentials.
   record authorizes the plan on the table.
 - `execute` has `maximum_attempts=1`: remediation is never retried blindly.
 - A plan may only name a capability declared in `REMEDIATION_CAPABILITIES`
-  (tool, verbs, and where the command lands), and the model's own
+  (tool, verbs, and where the command lands), and at least one step must change
+  the system: a plan that only reads repeats the investigation. The model's own
   `requires_approval` is overwritten. A plan that fails the guard rails never
   reaches the approval gate: the run reports with the reason instead.
 - `DRY_RUN=true` by default; commands are rendered and audited, not executed, so

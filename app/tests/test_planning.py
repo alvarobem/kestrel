@@ -44,6 +44,14 @@ SURFACE = RemediationSurface(
             must_contain=("deploy.yml",),
             description="re-run the integration pipeline for one service",
         ),
+        Capability(
+            id="inspect_workload",
+            tool="kubectl",
+            verbs=("get", "describe", "logs"),
+            must_contain=("-n checkout",),
+            effect="read",
+            description="read the state or logs of one workload",
+        ),
     )
 )
 
@@ -227,6 +235,40 @@ def test_a_capability_that_is_not_kubectl_is_checked_the_same_way() -> None:
     )
 
 
+def test_guard_rail_refuses_a_plan_that_only_reads() -> None:
+    # The investigation already read the logs and the events. Proposing to read
+    # them again spends a human approval on a no-op, so the plan is refused.
+    with pytest.raises(PlanUnusable, match="only reads"):
+        _usable(
+            _payload(
+                steps=[
+                    _step(
+                        capability="inspect_workload",
+                        command="kubectl logs deployment/checkout -n checkout",
+                    )
+                ]
+            )
+        )
+
+
+def test_guard_rail_accepts_a_read_step_next_to_a_change() -> None:
+    # Inspecting the result of an action is legitimate; only a plan made of
+    # nothing else is not.
+    _usable(
+        _payload(
+            steps=[
+                _step(),
+                _step(
+                    order=2,
+                    capability="inspect_workload",
+                    command="kubectl get pods -n checkout",
+                    rollback_command=None,
+                ),
+            ]
+        )
+    )
+
+
 def test_an_undeclared_surface_refuses_every_plan() -> None:
     with pytest.raises(PlanUnusable) as caught:
         require_usable(parse_plan(GOOD_ANSWER), RemediationSurface())
@@ -268,16 +310,26 @@ def test_prompt_declares_every_capability_and_its_constraints() -> None:
     # on-call tool.
     assert "rerun_pipeline" in prompt.user
     assert "deploy.yml" in prompt.user
+    # And a read-only capability is labelled as such.
+    assert "inspect_workload" in prompt.user
+    assert "(read-only" in prompt.user
 
 
-# --- the declaration an operator writes -------------------------------------
+def test_prompt_says_the_evidence_is_final() -> None:
+    # The model cannot gather more information: it has no tools and no turns. A
+    # prompt that leaves that implied invites "read the logs" as a plan step.
+    prompt = build_prompt(Incident(id="PD-3", title="checkout is down"), [], SURFACE)
+
+    assert "evidence is final" in prompt.system
+    assert "changes the system" in prompt.system
 
 
 def test_the_declaration_parses_into_capabilities() -> None:
     settings = Settings(
         remediation_capabilities=(
-            "restart_workload|kubectl|rollout,scale|-n checkout|restart one workload;"
-            "rerun_pipeline|gh|workflow|deploy.yml|re-run the pipeline"
+            "restart_workload|kubectl|rollout,scale|-n checkout|change|restart one workload;"
+            "inspect_workload|kubectl|get,logs|-n checkout|read|look at one workload;"
+            "rerun_pipeline|gh|workflow|deploy.yml||re-run the pipeline"
         )
     )
 
@@ -285,8 +337,12 @@ def test_the_declaration_parses_into_capabilities() -> None:
 
     assert [capability.id for capability in surface.capabilities] == [
         "restart_workload",
+        "inspect_workload",
         "rerun_pipeline",
     ]
+    assert surface.find("inspect_workload").effect == "read"
+    # An empty effect means "change": the common case is an action.
+    assert surface.find("rerun_pipeline").effect == "change"
     assert surface.find("rerun_pipeline").must_contain == ("deploy.yml",)
     assert surface.find("restart_workload").verbs == ("rollout", "scale")
 
@@ -296,6 +352,13 @@ def test_a_malformed_declaration_fails_loudly() -> None:
     settings = Settings(remediation_capabilities="restart_workload")
 
     with pytest.raises(ValueError, match="REMEDIATION_CAPABILITIES"):
+        _ = settings.remediation_surface
+
+
+def test_an_unknown_effect_fails_loudly() -> None:
+    settings = Settings(remediation_capabilities="restart|kubectl|||write|not a real effect")
+
+    with pytest.raises(ValueError, match="effect"):
         _ = settings.remediation_surface
 
 

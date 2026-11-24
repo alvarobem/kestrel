@@ -240,3 +240,30 @@ Pendiente real, no bloqueante: `Capability` no se filtra por entorno. Hoy un
 despliegue de integración y uno de producción declaran superficies distintas en su
 propio `.env`; hacerlo por incidente necesita que `Incident` lleve el entorno, que
 el código ya insinúa con el entity id.
+
+**L12 (2026-11-24) — segunda corrección del usuario, textual:**
+
+> "aqui hay algo que no cuadra, leer los logs los deberia haber leido ya en el paso de investigation. Los logs ya los tiene y los eventos. Con eso tiene que tomar una decisión que sea acciones concretas. [...] el plan no puede ser de salida leer logs, porque para eso ya está el agente, no aporta absolutamente nada"
+
+Defecto aceptado: yo lo había tratado como decisión de configuración ("si no
+quieres pasos de lectura, no declares la capacidad"). Es un defecto de diseño: el
+sistema *invitaba* a proponer un no-op. Corregido en tres frentes:
+
+1. `Capability.effect` (`change` | `read`), campo 5 de la declaración.
+2. Regla estructural en `require_usable`: un plan compuesto solo de capacidades
+   `read` se rechaza (`the plan only reads information the investigation already
+   gathered`). Un paso de lectura junto a uno de cambio sigue permitido.
+3. El prompt lo dice sin ambigüedad: `The evidence is final. You cannot investigate
+   further [...] Every plan needs at least one step that changes the system.`
+
+Evidencia antes/después, misma evidencia, mismo modelo:
+
+```
+antes:   1. [read_workload] kubectl logs deployment/order-handler -n checkout --tail=100
+después: 1. [restart_workload] kubectl rollout restart deployment/order-handler -n checkout
+            rollback=kubectl rollout undo deployment/order-handler -n checkout
+            hypothesis confidence=0.88
+```
+
+`.env` y `.env.example` quedaron con `read_workload` marcada `read`, para que la
+regla sea visible en la configuración y no solo en el código.
