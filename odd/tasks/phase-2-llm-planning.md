@@ -267,3 +267,46 @@ después: 1. [restart_workload] kubectl rollout restart deployment/order-handler
 
 `.env` y `.env.example` quedaron con `read_workload` marcada `read`, para que la
 regla sea visible en la configuración y no solo en el código.
+
+**L13 — el e2e encontró un defecto de evidencia (fase 1), no del planner.** Contra
+el tenant real, el planner declinó así:
+
+> `the metric does not establish a cause, and its interval count conflicts with the elevated failure ratio`
+
+Tenía razón. El resumen decía `failure ratio 11.24% (60 of 534); failures/interval 0
+vs baseline 10 (steady)` mientras el payload traía `fails=[0,0,30,0,0,30,0]`: dos de
+siete intervalos con 30 fallos. Dos defectos en `_metric_evidence`:
+
+1. comparaba **el último intervalo** contra la media, y el último era un valle;
+2. `trend = "spiking" if baseline and latest > 2 * baseline` convertía una base 0 en
+   `"steady"` — justo el caso más violento.
+
+Corregido: se compara el **pico contra la mediana** y se dice en cuántos intervalos
+ocurrió; además el `rt` aparece en el resumen (`response time peak 378,909, 61x
+typical, in 2 of 7 intervals`) en vez de viajar solo en el payload, que ningún nodo
+lee. Evidencia resultante tras el fix:
+
+```
+SERVICE-763ED91C8D5B7DE9: failure ratio 11.19% (60 of 536);
+failures/interval peak 30 against a typical 0, in 2 of 7 intervals; response time ...
+```
+
+**L14 — el e2e no llegó a la puerta de aprobación, y el motivo es correcto.** Con la
+evidencia ya honesta, el planner siguió declinando, dos veces y por razones distintas:
+
+> `order-handler`: "the logs show airport-information retrieval failures, but do not
+> indicate that restarting order-handler would address their cause"
+
+> `loyalty--bonus-generator--int`: "the metrics show increased failures and latency
+> but do not identify a cause that supports a safe, reversible action"
+
+Ambas son correctas: un `rollout restart` no arregla una dependencia externa caída, y
+una latencia periódica sin logs ni causa conocida no justifica una acción concreta.
+Lo que falta no es el planner: falta **causa** en la evidencia (despliegues, cambios de
+configuración, salud de la dependencia) y faltan **runbooks**, que es el hueco que ya
+se había identificado. Sin eso, el agente va a declinar seguido — que es preferible a
+inventar, pero deja la herramienta sin aportar.
+
+Sin probar todavía en el stack completo: la rama `plan presente → interrupt → signal →
+execute(dry) → verify → report` con un plan del modelo. El resto del workflow sí está
+ejercitado por los runs reales de `make smoke`.

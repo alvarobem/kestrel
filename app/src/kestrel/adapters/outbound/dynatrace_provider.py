@@ -24,6 +24,7 @@ guess here costs real evidence.
 from __future__ import annotations
 
 import asyncio
+import statistics
 from datetime import UTC, datetime, timedelta
 
 from kestrel.adapters.outbound.dynatrace import DynatraceClient, DynatraceError
@@ -575,6 +576,7 @@ def _metric_evidence(record: dict) -> Evidence | None:
     """
     requests = _series(record.get("req"))
     failures = _series(record.get("fails"))
+    response_times = _series(record.get("rt"))
     if not requests and not failures:
         return None
 
@@ -590,12 +592,9 @@ def _metric_evidence(record: dict) -> Evidence | None:
         parts.append(f"{total_failures:,.0f} failures")
 
     if len(failures) >= 2:
-        latest = failures[-1]
-        baseline = sum(failures[:-1]) / len(failures[:-1])
-        trend = "spiking" if baseline and latest > 2 * baseline else "steady"
-        parts.append(
-            f"failures/interval {latest:,.0f} vs baseline {baseline:,.0f} ({trend})"
-        )
+        parts.append(f"failures/interval {_pattern(failures)}")
+    if len(response_times) >= 2:
+        parts.append(f"response time {_pattern(response_times)}")
 
     if not parts:
         return None
@@ -609,10 +608,39 @@ def _metric_evidence(record: dict) -> Evidence | None:
         payload={
             "req": requests[-_MAX_POINTS:],
             "fails": failures[-_MAX_POINTS:],
-            "rt": _series(record.get("rt"))[-_MAX_POINTS:],
+            "rt": response_times[-_MAX_POINTS:],
         },
         confidence=0.75,
     )
+
+
+def _pattern(series: list[float]) -> str:
+    """How a series behaves across its intervals, without asserting a unit.
+
+    Measured against the *typical* interval, not the last one. Sampling the last
+    interval described a service as "steady" while two of its seven intervals were
+    on fire — the trough was simply the one that got sampled. A zero baseline is
+    the most violent spike there is, not a missing measurement, which is how the
+    earlier comparison managed to call it steady too.
+    """
+    typical = statistics.median(series)
+    peak = max(series)
+    intervals = len(series)
+    if peak <= 0:
+        return "no activity in the window"
+    if typical <= 0:
+        spikes = sum(1 for value in series if value > 0)
+        when = f"in {spikes} of {intervals} intervals" if spikes > 1 else "in one interval"
+        return f"peak {_amount(peak)} against a typical 0, {when}"
+    if peak <= 2 * typical:
+        return f"peak {_amount(peak)} vs typical {_amount(typical)} (steady)"
+    above = sum(1 for value in series if value > 2 * typical)
+    when = f"in {above} of {intervals} intervals" if above > 1 else "in one interval"
+    return f"peak {_amount(peak)}, {peak / typical:.0f}x typical, {when}"
+
+
+def _amount(value: float) -> str:
+    return f"{value:,.0f}" if value == int(value) else f"{value:,.1f}"
 
 
 def _problem_evidence(problem: dict) -> Evidence:

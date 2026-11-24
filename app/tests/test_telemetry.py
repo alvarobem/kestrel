@@ -593,8 +593,64 @@ async def test_metric_evidence_reports_ratio_and_trend() -> None:
 
     metric = next(item for item in found if item.kind == EvidenceKind.METRIC)
     assert "failure ratio 2.33%" in metric.summary
-    assert "(spiking)" in metric.summary
+    assert "5x typical" in metric.summary
     assert metric.external_id == "SERVICE-30CF729466F91717"
+
+
+async def test_a_periodic_incident_is_not_reported_as_steady() -> None:
+    """The series that lied: a quiet trough used to be the whole truth.
+
+    Sampling the last interval described this service as "steady" while two of its
+    seven intervals were failing, and the planner refused the contradiction. The
+    peak against the typical interval is what a human can act on.
+    """
+    platform = FakePlatformClient(
+        metrics=[
+            {
+                "dt.entity.service": "SERVICE-763ED91C8D5B7DE9",
+                "req": [5.0, 5.0, 256.0, 5.0, 5.0, 256.0, 2.0],
+                "fails": [0.0, 0.0, 30.0, 0.0, 0.0, 30.0, 0.0],
+                "rt": [8524.0, 6052.0, 371179.0, 6183.0, 5534.0, 378909.0, 5770.0],
+            }
+        ]
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-2", title="t", entity_ids=["SERVICE-763ED91C8D5B7DE9"]), InvestigationScope()
+    )
+
+    metric = next(item for item in found if item.kind == EvidenceKind.METRIC)
+    assert "steady" not in metric.summary
+    assert "peak 30 against a typical 0" in metric.summary
+    assert "in 2 of 7 intervals" in metric.summary
+    # The response-time spike used to travel only in the payload, invisible to the
+    # planner, which sees summaries and nothing else.
+    assert "response time" in metric.summary
+    assert "61x typical" in metric.summary
+
+
+async def test_a_spike_from_a_zero_baseline_is_a_spike() -> None:
+    # `baseline and latest > 2 * baseline` used to short-circuit to "steady" when
+    # the baseline was 0, which is the most violent case there is.
+    platform = FakePlatformClient(
+        metrics=[
+            {
+                "dt.entity.service": "SERVICE-AAA",
+                "req": [100.0, 100.0, 100.0],
+                "fails": [0.0, 0.0, 40.0],
+                "rt": [10.0, 10.0, 10.0],
+            }
+        ]
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-3", title="t", entity_ids=["SERVICE-AAA"]), InvestigationScope()
+    )
+
+    metric = next(item for item in found if item.kind == EvidenceKind.METRIC)
+    assert "against a typical 0" in metric.summary
 
 
 async def test_a_service_without_request_metrics_produces_no_metric_evidence() -> None:
