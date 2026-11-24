@@ -70,7 +70,7 @@ empty. They land in the next slice once we have seen the tenant's metric catalog
 | T5 | S7 | `provider-check` probes DQL and reports cleanly | inline | done |
 | T6 | S9 | Tests with the tenant's real response shape + polling/limits failures | inline | done |
 | T7 | S9 | `.env.example`, compose, `AGENTS.md`, `docs/PROJECT.md` | inline | done |
-| T8 | S9 | Live run: `make provider-check` with the real platform token | inline | pending owner token |
+| T8 | S9 | Live run: `provider-check` + `smoke` with the real platform token | inline | done |
 
 ## Log
 
@@ -107,11 +107,18 @@ event.type == "davis"`.
 - Scope stays a Python filter. Pushing it into DQL would require knowing each tenant's semantic
   attributes; the current rule is coarse and documented as such.
 
-**L5 — verification evidence.**
+**L5 — verification evidence (live tenant, not fixtures).**
 - `make lint` → All checks passed.
-- `make test` → 107 passed, 1 skipped (108 collected; the suite was 88 before this unit).
-- `make provider-check` → pending: needs `DYNATRACE_PLATFORM_URL` + `DYNATRACE_PLATFORM_TOKEN` in `.env`
-  (task T8). Nothing in this unit claims a live result it does not have.
+- `make test` → 108 passed, 1 skipped (109 collected; the suite was 88 before this unit).
+- `make provider-check` →
+  `platform DQL ok | fetch logs | limit 1 returned 1 record(s)` against
+  `https://psk34092.apps.dynatrace.com`.
+- `make smoke` → `summary: "…: 13 evidence item(s), 1 action(s), resolved=False"`, and the workflow
+  history shows the `investigate` activity returning **12 `LOG` evidence items** from
+  `order-handler` with their `trace_id` (`18e7aaf75fa4c6c420a1434fa89ef5f9`, …), collected at
+  `2026-11-24T10:02:37Z`. Real telemetry, real trace handles.
+- Davis returns 0 rows in this tenant: it has synthetic monitors and logs, no open Davis problems.
+  The query shape is the documented one; the emptiness is the tenant's, not the code's.
 
 **L6 — a test-hygiene bug this unit exposed, fixed.**
 `Settings()` reads the process environment and `make test` runs *inside the worker container*, which
@@ -121,6 +128,20 @@ real client and reached the tenant from a unit test. `conftest.py` now clears `D
 and `LLM_*` for every test. The suite is hermetic again, and that is a property worth keeping: a green
 run must not depend on which machine it runs on.
 
-**L7 — pending mirror.**
+**L7 — two bugs that only a live run could find, and the message that prevents the second.**
+1. `_window` opened at `incident.started_at`, so a just-created incident had a window a few
+   milliseconds wide: the queries ran, matched nothing, and the run reported "no evidence" against a
+   tenant full of it. The window now opens `_CONTEXT_BEFORE` (30 min) earlier — an incident is explained
+   by what happened before it surfaced — and is still floored at 6 h.
+2. `DYNATRACE_SCOPE_TAGS` in the operator's `.env` was `c` (a truncated paste). `InvestigationScope`
+   filtered out **every** record the tenant returned, and the evidence said "returned no evidence for
+   this incident inside the run scope" — which sends a human to look at the tenant instead of the filter.
+   The provider now distinguishes the cases: *retrieved N record(s) but none matched the run scope
+   (tags)*. That single message would have collapsed this debugging session to one line.
+
+Both are pinned: one test asserts a fresh incident investigates a non-empty window, and one asserts a
+fully-filtered result yields an explicit scope note rather than an empty list.
+
+**L8 — pending mirror.**
 Engram is unavailable in this session (`could not resolve an authoritative OpenCode runtime session`), so
 the recovery copy of this document is not written. The local file is authoritative.

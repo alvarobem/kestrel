@@ -380,7 +380,10 @@ async def test_platform_investigation_applies_the_run_scope() -> None:
         Incident(id="P-1", title="t"), InvestigationScope(tags=("customer-experience",))
     )
 
-    assert found == []
+    # Filtered, not empty: the run must be able to tell the two apart.
+    assert [item.kind for item in found] == [EvidenceKind.NOTE]
+    assert "none matched the run scope" in found[0].summary
+    assert "customer-experience" in found[0].summary
 
 
 async def test_platform_scope_matches_a_semantic_attribute() -> None:
@@ -436,3 +439,18 @@ async def test_the_provider_prefers_the_platform_surface() -> None:
 
     assert classic.asked == []
     assert platform.queries
+
+
+async def test_a_fresh_incident_investigates_a_window_with_context() -> None:
+    """The bug a live run caught: a just-created incident had a zero-width window."""
+    from datetime import datetime, timedelta
+
+    platform = FakePlatformClient()
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    await provider.investigate(Incident(id="P-1", title="fresh"), InvestigationScope())
+
+    start = datetime.fromisoformat(platform.queries[0]["start"])
+    end = datetime.fromisoformat(platform.queries[0]["end"])
+    assert end - start > timedelta(minutes=29)
+    assert end - start < timedelta(minutes=31)

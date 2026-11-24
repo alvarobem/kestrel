@@ -311,11 +311,18 @@ async def report(state: IncidentState, deps: CoreDeps) -> dict:
         f"{a.step_order}. {a.command} (executed={a.executed})" for a in state.get("actions", [])
     ]
     hypothesis = state.get("hypothesis")
+    evidence_count = len(state.get("evidence") or [])
     return {
         "phase": Phase.RESOLVED if resolved else Phase.FAILED,
         "report": IncidentReport(
             incident_id=incident.id,
-            summary=f"{incident.title}: {len(actions)} action(s), resolved={resolved}",
+            # The evidence count is in the summary on purpose: it is how a human
+            # reads from the CLI whether the investigation actually found anything
+            # or merely ran.
+            summary=(
+                f"{incident.title}: {evidence_count} evidence item(s), "
+                f"{len(actions)} action(s), resolved={resolved}"
+            ),
             root_cause=hypothesis.statement if hypothesis else None,
             actions_taken=actions,
             resolved=resolved,

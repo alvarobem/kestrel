@@ -64,7 +64,12 @@ _SCOPE_FIELDS = (
 )
 
 #: A stale webhook must not make the run scan a week of telemetry.
-_MAX_WINDOW_HOURS = 6
+_MAX_WINDOW = timedelta(hours=6)
+#: An incident is explained by what happened *before* it surfaced, so the window
+#: opens ahead of `started_at`. A freshly created incident would otherwise have a
+#: window a few milliseconds wide and the investigation would read nothing —
+#: which is exactly what a live run proved.
+_CONTEXT_BEFORE = timedelta(minutes=30)
 _MAX_PROBLEMS = 5
 _MAX_LOGS = 12
 _MAX_TEXT = 500
@@ -120,8 +125,9 @@ def _describe_platform(settings: Settings) -> tuple[bool, list[str]]:
     if records:
         record = records[0]
         lines.append(
-            f"  latest: {record.get('service.name', '?')} "
-            f"[{record.get('loglevel', '?')}] at {record.get('timestamp', '?')}"
+            f"  latest: {record.get('service.name') or 'unknown service'} "
+            f"[{record.get('loglevel') or 'n/a'}] "
+            f"{str(record.get('content') or '')[:80]}"
         )
     return True, lines
 
@@ -216,6 +222,25 @@ class DynatraceTelemetryProvider:
             # Nothing gathered *and* something failed: that is a provider outage,
             # not an empty tenant, and the run must record it as such.
             raise TelemetryUnavailable(PROVIDER_ID, problem_error or log_error or "no evidence")
+
+        if not evidence and not notes:
+            # The tenant answered and the scope dropped everything. Saying "no
+            # evidence" here would send the operator looking at the tenant instead
+            # of at the filter that discarded it — the distinction cost a full
+            # debugging session once.
+            fetched = len(problems) + len(logs)
+            if fetched:
+                notes.append(
+                    Evidence(
+                        provider=PROVIDER_ID,
+                        kind=EvidenceKind.NOTE,
+                        summary=(
+                            f"{fetched} record(s) retrieved but none matched the run scope "
+                            f"({', '.join(scope.tags)})"
+                        ),
+                        confidence=0.0,
+                    )
+                )
         return [*evidence, *notes]
 
     # --- classic API v2: the fallback --------------------------------------
@@ -257,12 +282,18 @@ def _query(
 
 
 def _window(incident: Incident) -> tuple[str, str]:
-    """The incident's own time window, floored so a stale payload stays cheap."""
+    """The window an incident is explained by: context before it, up to now.
+
+    Opening at `started_at` is wrong — a synthetic or just-fired incident has no
+    history inside it, so the investigation reads an empty slice and reports
+    "no evidence" for a tenant full of it. Opening `_CONTEXT_BEFORE` earlier and
+    flooring the span at `_MAX_WINDOW` keeps a stale payload cheap.
+    """
     now = datetime.now(UTC)
     started = incident.started_at
     if started.tzinfo is None:
         started = started.replace(tzinfo=UTC)
-    start = max(started, now - timedelta(hours=_MAX_WINDOW_HOURS))
+    start = max(min(started, now) - _CONTEXT_BEFORE, now - _MAX_WINDOW)
     return start.isoformat(), now.isoformat()
 
 
