@@ -21,6 +21,7 @@ Two rules this module keeps, both learned the hard way elsewhere:
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -85,8 +86,11 @@ def _sdk(model_id: str) -> Any:
         import litellm
     except ImportError as exc:  # pragma: no cover - packaging error, not a run
         raise LlmUnavailable(model_id, "the LLM client library is not installed") from exc
-    # Otherwise its cost-map and banner chatter becomes a log line per request.
+    # Otherwise its cost-map banner, per-request chatter and atexit flush lines
+    # land in the middle of an operator diagnostic. Errors still surface: they
+    # come back as exceptions, not as log lines.
     litellm.suppress_debug_info = True
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
     return litellm
 
 

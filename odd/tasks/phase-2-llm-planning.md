@@ -51,7 +51,11 @@ salida estructurada, qué se hace con una respuesta inválida).
 - T3 · S1 · inline · hecho · `config.py` + compose (env y volumen) + `.env.example`
 - T4 · S1,S3 · inline · hecho · CLI `llm-check` / `llm-login` + targets de Makefile
 - T5 · S6 · inline · hecho · `make lint` limpio; `make test` 154 passed, 1 skipped
-- T6 · S4 · humano · **pendiente** · el usuario completa `make llm-login` (device flow, requiere su navegador)
+- T6 · S4 · humano · **hecho** · login completado por el usuario; la seat responde
+
+**Estado: la rebanada está cerrada.** El puerto, el adaptador, la degradación, el
+volumen y los dos comandos funcionan contra la seat real. La tarea siguiente es el
+nodo `plan`.
 
 ## Log
 
@@ -100,3 +104,29 @@ para que nadie lo "arregle" volviéndola coroutine.
 **L7 — pendiente de decisión del usuario.** `LLM_MODEL=github_copilot/gpt-4.1` es
 un default; qué modelos ofrece la cuenta lo decide el plan de Copilot. Si
 `llm-check` responde "model not available", se cambia ese valor y nada más.
+
+**L8 (2026-11-24) — modelo por defecto, textual del usuario:**
+
+> "ya he hecho login, pero el modelo por degefto debe ser GPT-6 Luna"
+
+Resuelto sin adivinar: el catálogo instalado (litellm 1.110.3) expone 68 ids
+`github_copilot/*`, entre ellos `gpt-6-luna`, `gpt-luna-latest`, `gpt-6-sol`,
+`gpt-6.1-sol`, `gpt-6.2-sol`. Una llamada real con la seat confirmó que
+`github_copilot/gpt-6-luna` responde. Ese es el default en los cuatro lugares
+donde vive el valor: `config.py`, `docker-compose.yml`, `.env.example`, `.env`.
+
+Evidencia final, con el código de este repo:
+
+```
+$ make llm-check
+llm provider: copilot (personal seat, device OAuth)
+llm model:    github_copilot/gpt-6-luna
+seat token:   present at /data/copilot/access-token
+answer:  kestrel llm ok
+latency: 3.6s
+```
+
+Nota: `llm-check` tarda segundos, no milisegundos, porque cada invocación levanta
+litellm y abre conexión. Para los nodos de fase 2 eso es irrelevante — son
+actividades con timeout propio — pero no se debe medir calidad de razonamiento con
+esa latencia.

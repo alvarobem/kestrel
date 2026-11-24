@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # seat, authorized once by device OAuth. There is no API key to bill and
     # nothing to paste into `.env`.
     llm_provider: str = "copilot"
-    llm_model: str = "github_copilot/gpt-4.1"
+    llm_model: str = "github_copilot/gpt-6-luna"
     #: Where the seat token lives. It must match `GITHUB_COPILOT_TOKEN_DIR`,
     #: which compose derives from the same `LLM_TOKEN_DIR` variable: the client
     #: library reads that variable itself, and a mismatch is a silent "please

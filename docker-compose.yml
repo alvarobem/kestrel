@@ -29,7 +29,7 @@ x-agent-env: &agent-env
   DRY_RUN: ${DRY_RUN:-true}
   APPROVAL_MODE: ${APPROVAL_MODE:-human}
   LLM_PROVIDER: ${LLM_PROVIDER:-copilot}
-  LLM_MODEL: ${LLM_MODEL:-github_copilot/gpt-4.1}
+  LLM_MODEL: ${LLM_MODEL:-github_copilot/gpt-6-luna}
   # The Copilot seat token lives on a volume, so it survives recreating the
   # container. The client library reads GITHUB_COPILOT_TOKEN_DIR itself, so
   # both names come from one variable and cannot drift.

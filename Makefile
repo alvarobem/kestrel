@@ -85,9 +85,9 @@ provider-check: ## Verify the active telemetry provider and list what it sees
 llm-login: ## Once per machine: authorize your GitHub Copilot seat (device flow)
 	$(NO_TRACING) $(COMPOSE) run --rm -it agent-worker python -m kestrel.adapters.inbound.cli llm-login
 
+# The worker, not $(SERVICE): the seat token lives on the worker's volume, and
+# the API never reasons.
 llm-check: ## Verify the configured LLM answers, and with what credential
-	# The worker, not $(SERVICE): the seat token lives on the worker's volume and
-	# the API never reasons.
 	$(COMPOSE) exec agent-worker python -m kestrel.adapters.inbound.cli llm-check
 
 dynatrace-check: ## Deprecated alias of provider-check
