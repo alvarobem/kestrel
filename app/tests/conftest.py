@@ -83,6 +83,30 @@ class StubExecutor:
         )
 
 
+class StubLlmClient:
+    """Answers with canned text and records the prompts it was given.
+
+    It answers in order and fails loudly when asked for more than it holds, so a
+    test that asserts "exactly one repair attempt" cannot pass by accident.
+    """
+
+    model_id = "stub-llm"
+
+    def __init__(self, answers: list[str] | None = None, error: Exception | None = None) -> None:
+        self.answers = list(answers or [])
+        self.error = error
+        #: Every prompt, as `(system, user)`.
+        self.prompts: list[tuple[str, str]] = []
+
+    async def complete(self, *, system: str, user: str) -> str:
+        self.prompts.append((system, user))
+        if self.error is not None:
+            raise self.error
+        if not self.answers:
+            raise AssertionError("the stub was asked for more answers than it holds")
+        return self.answers.pop(0)
+
+
 @pytest.fixture(autouse=True)
 def no_ambient_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the suite hermetic.
@@ -121,6 +145,11 @@ def executor() -> StubExecutor:
 @pytest.fixture
 def telemetry() -> StubTelemetryProvider:
     return StubTelemetryProvider()
+
+
+@pytest.fixture
+def llm() -> StubLlmClient:
+    return StubLlmClient()
 
 
 @pytest.fixture

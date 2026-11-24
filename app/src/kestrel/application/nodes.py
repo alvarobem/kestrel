@@ -9,15 +9,18 @@ a port or a frozen policy value in `CoreDeps` (`application/deps.py`). That is
 what lets a test drive the whole lifecycle with a fake approval channel and a
 fake executor.
 
-The wiring is real and runnable end to end; the LLM-driven steps are explicit
-stubs. Keep the guard rails: read-only investigation, approval before any
-non-dry-run action, and one audit record per executed step.
+The wiring is real and runnable end to end. `plan` reasons with the injected
+model; `triage`, `verify` and `report` are still explicit stubs. Keep the guard
+rails: read-only investigation, approval before any non-dry-run action, and one
+audit record per executed step.
 """
 
 from __future__ import annotations
 
 from kestrel.application.deps import CoreDeps
-from kestrel.application.errors import TelemetryUnavailable
+from kestrel.application.errors import LlmUnavailable, PlanUnusable, TelemetryUnavailable
+from kestrel.application.planner import build_prompt, parse_plan, repair_tail, require_usable
+from kestrel.application.ports import LlmClient
 from kestrel.application.state import IncidentState
 from kestrel.domain.evidence import dedupe, merge_repeated, select_top
 from kestrel.domain.models import (
@@ -25,11 +28,9 @@ from kestrel.domain.models import (
     Approval,
     Evidence,
     EvidenceKind,
-    Hypothesis,
     IncidentReport,
     Phase,
     RemediationPlan,
-    RemediationStep,
     Verification,
 )
 from kestrel.domain.policy import (
@@ -181,32 +182,81 @@ async def investigate(state: IncidentState, deps: CoreDeps) -> dict:
 
 
 async def plan(state: IncidentState, deps: CoreDeps) -> dict:
-    """Turn evidence into a ranked hypothesis and a remediation plan.
+    """Turn evidence into a hypothesis and a remediation plan.
 
-    TODO(node): LLM + runbook retrieval. Steps must be reversible where
-    possible, carry a rollback command, and never include credentials.
+    The model proposes; this node disposes. Everything crossing that boundary is
+    shape-checked and guard-railed in `application/planner.py`, and a proposal
+    that does not survive is never shown to a human: `plan` degrades to no plan,
+    the run goes straight to `report`, and the reason travels as evidence.
+
+    Degrading instead of failing is deliberate. A model that does not answer, a
+    seat that is not signed in and an answer that is not JSON are all conditions
+    of the world, and none of them is a reason to lose the incident.
+
+    The retry budget is one, not a loop: a model that produced an unusable answer
+    twice produces a third, and each attempt is a paid call. A plan the evidence
+    does not support is not retried at all — that answer is the model doing its
+    job.
     """
     incident = state["incident"]
-    placeholder_step = RemediationStep(
-        order=1,
-        description="placeholder: no remediation logic implemented yet",
-        command=f"echo 'dry-run remediation for {incident.id}'",
-        target=incident.affected_entities[0] if incident.affected_entities else "unknown",
-        reversible=True,
-        risk="low",
-    )
-    hypothesis = Hypothesis(statement="unconfirmed: plan is a stub", confidence=0.1)
+    evidence = dedupe(state.get("evidence") or [])
+    llm = deps.llm
+    if llm is None:
+        return _no_plan(
+            "no model is authorized for this run: sign in the seat with `make llm-login`, "
+            "or configure one"
+        )
+
+    prompt = build_prompt(incident, evidence)
+    try:
+        proposed = await _propose(llm, prompt.system, prompt.user)
+    except LlmUnavailable as exc:
+        return _no_plan(f"{llm.model_id} could not answer: {exc.detail}")
+    except PlanUnusable as exc:
+        if not exc.repairable:
+            return _no_plan(exc.detail)
+        try:
+            proposed = await _propose(
+                llm, prompt.system, prompt.user + repair_tail(exc.detail)
+            )
+        except LlmUnavailable as retry_exc:
+            return _no_plan(f"{llm.model_id} could not answer: {retry_exc.detail}")
+        except PlanUnusable as retry_exc:
+            return _no_plan(f"the model produced an unusable plan: {retry_exc.detail}")
+
     return {
         "phase": Phase.PLANNING,
-        "hypothesis": hypothesis,
-        "plan": RemediationPlan(
-            summary="placeholder plan",
-            hypothesis=hypothesis,
-            steps=[placeholder_step],
-            blast_radius="none (dry run)",
-            requires_approval=True,
-        ),
-        "notes": ["plan is a stub"],
+        "hypothesis": proposed.hypothesis,
+        "plan": proposed,
+        "notes": [
+            f"plan proposed by {llm.model_id}: {len(proposed.steps)} step(s), "
+            f"hypothesis confidence={proposed.hypothesis.confidence:.2f}"
+        ],
+    }
+
+
+async def _propose(llm: LlmClient, system: str, user: str) -> RemediationPlan:
+    """One round trip: ask, parse, guard-rail. Raises rather than guessing."""
+    plan = parse_plan(await llm.complete(system=system, user=user))
+    require_usable(plan)
+    return plan
+
+
+def _no_plan(reason: str) -> dict:
+    """No plan on the table: report, instead of asking a human to approve nothing."""
+    return {
+        "phase": Phase.PLANNING,
+        "hypothesis": None,
+        "plan": None,
+        "evidence": [
+            Evidence(
+                provider="kestrel",
+                kind=EvidenceKind.NOTE,
+                summary=f"planning degraded: {reason}",
+                confidence=0.0,
+            )
+        ],
+        "notes": [f"plan degraded: {reason}"],
     }
 
 
@@ -345,7 +395,7 @@ async def report(state: IncidentState, deps: CoreDeps) -> dict:
             actions_taken=actions,
             top_evidence=top,
             resolved=resolved,
-            follow_ups=["wire real investigation, planning and verification"],
+            follow_ups=["wire real verification and the sandbox executor"],
         ),
         "notes": [f"report generated (resolved={resolved})"],
     }

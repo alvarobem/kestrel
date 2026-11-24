@@ -73,3 +73,18 @@ class LlmUnavailable(ApplicationError):
         super().__init__(f"{model_id} unavailable: {detail}")
         self.model_id = model_id
         self.detail = detail
+
+
+class PlanUnusable(ApplicationError):
+    """A model's answer cannot become a plan a human is asked to authorize.
+
+    `repairable` says whether asking again could help: a malformed answer is worth
+    one retry with the reason attached, while "the evidence does not support any
+    action" is a legitimate answer that a retry would only repeat — and every call
+    is paid.
+    """
+
+    def __init__(self, detail: str, *, repairable: bool = True) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.repairable = repairable

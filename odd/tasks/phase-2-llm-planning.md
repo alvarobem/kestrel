@@ -57,6 +57,37 @@ salida estructurada, qué se hace con una respuesta inválida).
 volumen y los dos comandos funcionan contra la seat real. La tarea siguiente es el
 nodo `plan`.
 
+## Specs (segunda rebanada — el nodo `plan`)
+
+**S7 — El modelo propone, el nodo dispone.** `plan` pide un plan al puerto `LlmClient`,
+lo parsea y lo pasa por guardarraíles puros (`application/planner.py`). Lo que no
+sobrevive no llega nunca a un humano.
+
+**S8 — Los guardarraíles son del dominio, no del prompt.** Un paso con wildcard, con
+`--all`/`-A`, sin target, o irreversible sin `rollback_command` se rechaza. El
+`requires_approval` que devuelve el modelo se ignora: la política es nuestra.
+
+**S9 — Declinar es una respuesta válida.** Si la evidencia no sostiene una acción, el
+modelo devuelve `steps: []` y su explicación se convierte en la razón registrada. No
+se reintenta: reintentar repetiría la misma respuesta y costaría otra llamada.
+
+**S10 — El prompt no filtra payloads.** Solo viaja `Evidence.summary`; `payload` (logs
+crudos, cabeceras con tokens) se queda en casa. Hay un test que lo fija.
+
+**S11 — Un plan degradado nunca pide aprobación.** Sin plan, la corrida va a `report`
+con la razón como evidencia. `make smoke` explica ese desenlace en vez de culpar al
+worker.
+
+**S12 — BLOQUEANTE ABIERTO: la superficie de remediación no está declarada.** Ver L10.
+
+## Tasks (segunda rebanada)
+
+- T7 · S7,S8 · inline · **hecho** · `application/planner.py`: prompt, parseo, guardarraíles
+- T8 · S7,S9,S11 · inline · **hecho** · nodo `plan` con reparación acotada a un intento
+- T9 · S11 · inline · **hecho** · `smoke` explica "terminó sin pedir aprobación" y por qué
+- T10 · S7-S11 · inline · **hecho** · `test_planning.py` (15 casos) + `StubLlmClient`
+- T11 · S12 · **decisión del usuario** · declarar qué comandos puede nombrar un plan
+
 ## Log
 
 **L1 (2026-11-24) — pedido original, textual:**
@@ -130,3 +161,41 @@ Nota: `llm-check` tarda segundos, no milisegundos, porque cada invocación levan
 litellm y abre conexión. Para los nodos de fase 2 eso es irrelevante — son
 actividades con timeout propio — pero no se debe medir calidad de razonamiento con
 esa latencia.
+
+**L9 — el nodo `plan` funciona; el modelo se niega a inventar.** Dos corridas reales
+con `github_copilot/gpt-6-luna`, mismo código:
+1. Evidencia "1.0x, steady" → `the evidence did not support any action: No
+   remediation is proposed because the available evidence does not identify a cause`.
+2. Davis problem + `OutOfMemoryError` (x412) + failure ratio 0.83 vs 0.01 →
+   `The evidence points to heap exhaustion, but lacks the runtime and deployment
+   details needed to choose a safe, targeted remediation command`.
+
+La segunda es la importante: con evidencia que **sí** sostiene una acción, el modelo
+declinó por no conocer cluster, namespace ni nombre de deployment. No inventó
+`kubectl rollout restart deploy/foo` con un nombre plausible. Un modelo menos
+cuidadoso habría producido un plan que parece perfecto y apunta al objeto
+equivocado — el peor resultado posible para una herramienta que ejecuta acciones.
+
+**L10 — BLOQUEANTE (S12): falta declarar la superficie de remediación.** El prompt
+no puede afirmar capacidades que el sistema no tiene (el sandbox sigue sin diseño,
+§13), así que el modelo no sabe qué vocabulario de acciones es legal. Mientras no se
+declare, `plan` degradará casi siempre con una razón correcta pero inútil para el
+on-call. Dos caminos, decisión del usuario:
+- **A. Vocabulario cerrado**: el modelo propone `RESTART_DEPLOYMENT`/`SCALE`/
+  `ROLLBACK` sobre un target, y el ejecutor renderiza el comando. Elimina la clase
+  entera de "el modelo inventó un flag"; los guardarraíles pasan a ser estructurales.
+- **B. Superficie declarada**: el prompt recibe el contexto real (herramienta,
+  cluster, namespace, nombres válidos) como valor de política en `CoreDeps`, y el
+  modelo escribe el comando dentro de ese vocabulario.
+
+Evidencia del desenlace degradado, con el stack completo:
+
+```
+$ make smoke
+the run finished without asking for approval (status=COMPLETED)
+final phase=failed
+  - investigate degraded: dynatrace returned no evidence for this incident inside the run scope
+  - plan degraded: the evidence did not support any action: ...
+  - approval gate reached with no plan
+  - report generated (resolved=False)
+```

@@ -134,11 +134,15 @@ async def cmd_smoke(settings: Settings) -> int:
         pending = await runs.pending_approval(incident.id)
         if pending is not None:
             break
+        # Stop waiting as soon as the run reached a terminal phase: a run can
+        # finish without ever asking, and 30 seconds of silence is a bad way to
+        # learn it.
+        if (await runs.view(incident.id)).status != "RUNNING":
+            break
         await asyncio.sleep(0.5)
 
     if pending is None:
-        print("no approval requested within 30s; is agent-worker running? (`make up`)")
-        return 1
+        return await _explain_no_approval(runs, incident.id)
 
     print(f"approval requested: {pending.get('plan', {}).get('summary', 'unknown plan')}")
     await decide_incident(runs, incident.id, Approval(approved=True, actor="smoke"))
@@ -164,6 +168,34 @@ async def cmd_smoke(settings: Settings) -> int:
         return 0
     print("smoke failed: the run did not resolve and it was not a dry run")
     return 1
+
+
+async def _explain_no_approval(runs: TemporalRunGateway, incident_id: str) -> int:
+    """Say why nothing reached the human, instead of blaming the stack.
+
+    A run that finds no evidence, or whose planner declines to invent one, has
+    nothing to approve — and that is the system working. The operator needs the
+    reason, not a stack trace or a 30-second silence.
+    """
+    view = await runs.view(incident_id)
+    if view.status == "RUNNING":
+        print("no approval requested and the run is still running; is agent-worker up? (`make up`)")
+        return 1
+
+    result = await runs.outcome(incident_id, timeout_seconds=10)
+    print(f"the run finished without asking for approval (status={view.status})")
+    print(f"final phase={result.get('phase')}")
+    for note in result.get("notes") or []:
+        print(f"  - {note}")
+
+    report = result.get("report")
+    if hasattr(report, "model_dump"):
+        report = report.model_dump(mode="json")
+    if isinstance(report, dict) and report.get("top_evidence"):
+        print("evidence a human should read first:")
+        for line in report["top_evidence"]:
+            print(f"  {line}")
+    return 0 if view.status == "COMPLETED" else 1
 
 
 def main(argv: list[str] | None = None) -> int:
