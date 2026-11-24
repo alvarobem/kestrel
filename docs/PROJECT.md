@@ -137,6 +137,7 @@ convention.
   ┌──────────────────────────────────────────────────────────────┐
   │  agent-api (stateless)                                       │
   │    POST /incidents            start workflow                 │
+  │    POST /incidents/natural    start workflow from a sentence  │
   │    GET  /incidents/{id}       status + pending plan (query)   │
   │    POST /incidents/{id}/resume      approve (signal)          │
   └───────────────┬──────────────────────────────────────────────┘
@@ -172,7 +173,7 @@ policy and audit entry.
 | Node | Responsibility | Needs LLM | Writes |
 | --- | --- | --- | --- |
 | `receive` | Normalize payload, open the trail | no | state |
-| `triage` | Severity, scope, ownership, urgency | yes | `evidence` |
+| `triage` | Severity, scope, ownership, urgency; reads a human report into entities | yes | `incident`, `evidence` |
 | `investigate` | Pull and rank evidence from the active provider | optional | `evidence`, attempts |
 | `plan` | Hypothesis + plan with rollback | yes | `hypothesis`, `plan` |
 | `approval_gate` | Suspend via `interrupt()`, record decision | no | `approvals` |
@@ -370,6 +371,30 @@ problem-notification webhook pointed at `POST /incidents/webhook/{provider}`.
 The provider id selects a payload mapper in `adapters/inbound/webhooks.py`; an
 unknown id is a 404, never a guess. Starting the same incident twice is
 rejected by Temporal (`REJECT_DUPLICATE`), so a retrying webhook is safe.
+
+**A person can also just say it.** `POST /incidents/natural` (or
+`python -m kestrel.adapters.inbound.cli report "…"`) accepts one sentence —
+*"yesterday the java-micronaut service would not start"* — and starts a run from
+it. Two rules make that honest:
+
+- The sentence **is** the identity. `application/policy.natural_incident_id`
+  hashes the normalized words into `nl-<digest>`, so a retried submission is the
+  same incident and the engine refuses the duplicate. A genuinely new report of
+  the same words supplies an `id`; there is no second id system.
+- No model is called in the request path. The words travel verbatim in
+  `Incident.raw["text"]` into workflow history, and `triage` reads them into
+  severity and `affected_entities` inside the run (`application/intake.py`),
+  where it has a retry policy and degrades with a recorded reason. Without that
+  step the incident has no entity id and no service name, the investigation fails
+  closed, and the run looks like an investigation that found nothing.
+
+The answer is guard-railed before it becomes a query: an undeclared severity
+becomes `unknown`, duplicate names collapse, and a value that is a sentence
+rather than a name (`the service that was down`) is dropped — a name that cannot
+match is worse than no name, because it hides that the run had no target. A
+relative time ("yesterday") is kept in the description and never converted to a
+timestamp: the investigation window stays bounded to the last 6 hours, so a
+report about yesterday reads the same window any other incident would.
 
 **Scoping.** `DYNATRACE_SCOPE_TAGS` narrows investigation to the tags/management
 zones this prototype may reason about. It is frozen into `CoreDeps` as an

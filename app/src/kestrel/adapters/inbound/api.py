@@ -14,9 +14,16 @@ exception handler.
 Endpoints:
     GET  /health
     POST /incidents                     start a run from a normalized incident
+    POST /incidents/natural             start a run from one sentence a person typed
     POST /incidents/webhook/{provider}  start a run from that provider's payload
     GET  /incidents/{id}                status, phase and pending approval
     POST /incidents/{id}/resume         approve/reject the pending plan
+
+A report typed in natural language is translated into an `Incident` by the
+inbound module that owns that contract (`natural_language.py`): the sentence
+becomes the identity, the title and the description, and reading it into severity
+and services happens inside the run (`triage`), where it has retries and can
+degrade with a recorded reason. The API itself stays stateless and instant.
 """
 
 from __future__ import annotations
@@ -27,8 +34,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
+from kestrel.adapters.inbound.natural_language import incident_from_text
 from kestrel.adapters.inbound.webhooks import UnknownIncidentProvider, incident_from_payload
 from kestrel.adapters.outbound.runs import TemporalRunGateway
 from kestrel.application.errors import (
@@ -74,6 +82,27 @@ class ResumeRequest(BaseModel):
     approved: bool
     actor: str = "unknown"
     comment: str = ""
+
+
+class NaturalReportRequest(BaseModel):
+    """One sentence a person typed, plus an optional explicit identity.
+
+    The text is normalized here because a report of blanks is not a report, and a
+    trailing newline must not become a second incident.
+    """
+
+    text: str
+    #: Overrides the identity derived from the words. Needed only when the same
+    #: sentence is a genuinely new report (a second outage, the day after).
+    id: str | None = None
+
+    @field_validator("text")
+    @classmethod
+    def _needs_words(cls, value: str) -> str:
+        words = " ".join(value.split())
+        if not words:
+            raise ValueError("a report needs some words")
+        return words
 
 
 def _runs(request: Request) -> RunGateway:
@@ -130,6 +159,19 @@ def health(request: Request) -> dict:
 
 @app.post("/incidents", status_code=202)
 async def create_incident(incident: Incident, request: Request) -> dict:
+    handle = await submit_incident(_runs(request), incident, request.app.state.limits)
+    return _handle_payload(handle)
+
+
+@app.post("/incidents/natural", status_code=202)
+async def create_from_report(report: NaturalReportRequest, request: Request) -> dict:
+    """Start a run from one sentence: "yesterday java-micronaut would not start".
+
+    The sentence becomes the incident's identity, so a retried submission is
+    refused by the engine (409) instead of starting a second remediation. No model
+    is called here: the run reads its own report in `triage`.
+    """
+    incident = incident_from_text(report.text, report.id)
     handle = await submit_incident(_runs(request), incident, request.app.state.limits)
     return _handle_payload(handle)
 

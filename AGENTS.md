@@ -72,12 +72,14 @@ app/src/kestrel/
     state.py               IncidentState (Temporal-serializable)
     graph.py               flow: nodes, edges, per-node activity options
     incidents.py           control-plane use cases: submit, inspect, decide
+    intake.py              reading a human report: prompt, parse, guard rails
     errors.py              typed application errors (the adapter maps them)
-    policy.py              run identity (workflow_id)
+    policy.py              run identity (workflow_id, report ids)
   adapters/
     inbound/               the world drives us
       api.py               stateless HTTP control plane
-      cli.py               smoke + provider-check
+      cli.py               smoke + provider-check + report
+      natural_language.py  a sentence a person typed -> Incident
       workflow.py          Temporal workflow: lifecycle, approval wait, signals
       webhooks.py          provider id -> payload mapper (inbound ACL registry)
       dynatrace_problem.py Dynatrace payload -> Incident (one mapper)

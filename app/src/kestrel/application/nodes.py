@@ -18,7 +18,13 @@ audit record per executed step.
 from __future__ import annotations
 
 from kestrel.application.deps import CoreDeps
-from kestrel.application.errors import LlmUnavailable, PlanUnusable, TelemetryUnavailable
+from kestrel.application.errors import (
+    IntakeUnusable,
+    LlmUnavailable,
+    PlanUnusable,
+    TelemetryUnavailable,
+)
+from kestrel.application.intake import build_intake_prompt, parse_intake, reported_text
 from kestrel.application.planner import build_prompt, parse_plan, repair_tail, require_usable
 from kestrel.application.ports import LlmClient
 from kestrel.application.state import IncidentState
@@ -28,6 +34,7 @@ from kestrel.domain.models import (
     Approval,
     Evidence,
     EvidenceKind,
+    Incident,
     IncidentReport,
     Phase,
     RemediationPlan,
@@ -84,10 +91,24 @@ async def receive(state: IncidentState, deps: CoreDeps) -> dict:
 async def triage(state: IncidentState, deps: CoreDeps) -> dict:
     """Classify severity, scope and ownership.
 
-    TODO(node): call the LLM with the incident payload plus the ownership map
-    (management zones / tags) and produce severity + affected services.
+    A report a person typed arrives as words and nothing else: no entity ids, no
+    severity, no display names. The investigation joins telemetry on those fields,
+    so a run that skips this step reads nothing and says so three nodes later —
+    which is exactly the failure this node exists to prevent. The model reads the
+    report once here, and its answer is guard-railed in `application/intake.py`.
+
+    Degrading is deliberate: no model, an unusable answer and a report that names
+    no service are all conditions of the world. Each one is recorded, and the
+    reporter's own words stay the incident.
+
+    TODO(node): read the ownership map (management zones / tags) as well, so a
+    triaged severity also routes to the team that owns the entity.
     """
     incident = state["incident"]
+    text = reported_text(incident)
+    if text is not None:
+        return await _triage_report(incident, text, deps)
+
     confidence = 0.6 if incident.severity.value != "unknown" else 0.3
     return {
         "phase": Phase.TRIAGING,
@@ -104,6 +125,72 @@ async def triage(state: IncidentState, deps: CoreDeps) -> dict:
             )
         ],
         "notes": ["triage is a stub; severity is taken from the source payload"],
+    }
+
+
+async def _triage_report(incident: Incident, text: str, deps: CoreDeps) -> dict:
+    """Read a human report into the fields the investigation needs."""
+    llm = deps.llm
+    if llm is None:
+        return _triage_degraded(
+            "no model is authorized for this run: the report keeps the reporter's words "
+            "and names no service, so there is no telemetry target"
+        )
+
+    prompt = build_intake_prompt(incident)
+    try:
+        intake = parse_intake(await llm.complete(system=prompt.system, user=prompt.user))
+    except LlmUnavailable as exc:
+        return _triage_degraded(f"{llm.model_id} could not read the report: {exc.detail}")
+    except IntakeUnusable as exc:
+        return _triage_degraded(f"the model's reading of the report is unusable: {exc.detail}")
+
+    # The enrichment travels in state: `investigate` joins telemetry on
+    # `affected_entities`, and an empty list is the honest answer when the report
+    # named nothing — filled in with a guess it would silently read the wrong slice.
+    enriched = incident.model_copy(
+        update={
+            "severity": intake.severity,
+            "affected_entities": intake.affected_entities or incident.affected_entities,
+            "description": intake.description or incident.description,
+        }
+    )
+    notes = [
+        f"report read by {llm.model_id}: severity={intake.severity.value}, "
+        f"entities={', '.join(intake.affected_entities) or 'none named'}"
+    ]
+    if not intake.affected_entities:
+        notes.append(
+            "the report names no service: the investigation has no target until one is supplied"
+        )
+    return {
+        "phase": Phase.TRIAGING,
+        "incident": enriched,
+        "evidence": [
+            Evidence(
+                provider="kestrel",
+                kind=EvidenceKind.NOTE,
+                summary=f"triage: {intake.description or text}",
+                confidence=0.6 if intake.affected_entities else 0.3,
+            )
+        ],
+        "notes": notes,
+    }
+
+
+def _triage_degraded(reason: str) -> dict:
+    """A report nobody could read: recorded, never invented away."""
+    return {
+        "phase": Phase.TRIAGING,
+        "evidence": [
+            Evidence(
+                provider="kestrel",
+                kind=EvidenceKind.NOTE,
+                summary=f"triage degraded: {reason}",
+                confidence=0.0,
+            )
+        ],
+        "notes": [f"triage degraded: {reason}"],
     }
 
 

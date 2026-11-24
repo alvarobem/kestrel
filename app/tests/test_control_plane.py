@@ -211,9 +211,58 @@ def test_api_forwards_an_approval_as_a_domain_decision(gateway: FakeRunGateway) 
     )
 
 
+# --- a sentence is enough to start a run -----------------------------------
+
+REPORT = "ayer no arrancaba el servicio java-micronaut"
+
+
+def test_api_starts_a_run_from_a_sentence(gateway: FakeRunGateway) -> None:
+    """The words become the incident: identity, title and the audit trail."""
+    with TestClient(app) as client:
+        app.state.runs = gateway
+        response = client.post("/incidents/natural", json={"text": REPORT})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["incident_id"].startswith("nl-")
+    assert body["workflow_id"] == f"incident-{body['incident_id']}"
+
+    incident = gateway.started[0][0]
+    assert incident.source == "human"
+    assert incident.raw["text"] == REPORT
+    assert incident.description == REPORT
+    assert "java-micronaut" in incident.title
+
+
+def test_api_derives_one_incident_per_report(gateway: FakeRunGateway) -> None:
+    """Two submissions of the same words are one incident, so the engine refuses the second."""
+    with TestClient(app) as client:
+        app.state.runs = gateway
+        first = client.post("/incidents/natural", json={"text": REPORT}).json()
+        second = client.post("/incidents/natural", json={"text": f"  {REPORT}  "}).json()
+
+    assert first["incident_id"] == second["incident_id"]
+
+
+def test_api_honours_an_explicit_report_id(gateway: FakeRunGateway) -> None:
+    with TestClient(app) as client:
+        app.state.runs = gateway
+        body = client.post("/incidents/natural", json={"text": REPORT, "id": "PD-77"}).json()
+
+    assert body["workflow_id"] == "incident-PD-77"
+    assert gateway.started[0][0].id == "PD-77"
+
+
+def test_api_refuses_a_report_without_words(gateway: FakeRunGateway) -> None:
+    with TestClient(app) as client:
+        app.state.runs = gateway
+        response = client.post("/incidents/natural", json={"text": "   \n "})
+
+    assert response.status_code == 422
+    assert gateway.started == []
+
+
 # --- webhook ingestion is per provider -------------------------------------
-
-
 def test_api_maps_a_webhook_payload_through_the_provider_registry(
     gateway: FakeRunGateway,
 ) -> None:

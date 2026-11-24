@@ -75,6 +75,20 @@ class LlmUnavailable(ApplicationError):
         self.detail = detail
 
 
+class IntakeUnusable(ApplicationError):
+    """A model's answer cannot become the fields of an incident.
+
+    Same shape as `PlanUnusable` and for the same reason: the point is that the
+    answer is not what we asked for, not that some SDK raised. `triage` degrades
+    on it — the reporter's own words stay the incident, and the reason is recorded
+    instead of guessed away.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 class PlanUnusable(ApplicationError):
     """A model's answer cannot become a plan a human is asked to authorize.
 

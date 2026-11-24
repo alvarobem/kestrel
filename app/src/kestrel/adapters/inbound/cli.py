@@ -4,10 +4,16 @@
     python -m kestrel.adapters.inbound.cli llm-check
     python -m kestrel.adapters.inbound.cli llm-login
     python -m kestrel.adapters.inbound.cli smoke
+    python -m kestrel.adapters.inbound.cli report "yesterday java-micronaut would not start"
 
 `smoke` starts a real workflow against the local Temporal server, waits for the
 approval request, approves it and prints the final report. It requires the
 agent-worker to be running (`make up`).
+
+`report` is the same sentence-based intake as `POST /incidents/natural`: the words
+are the incident, and the run reads them. It starts the run and prints its
+identity; approving it later goes through the API or Temporal, exactly like any
+other run.
 
 It is a driving adapter, so it goes through the same use cases as the HTTP
 control plane (`application/incidents.py`) instead of assembling a workflow
@@ -28,6 +34,7 @@ import sys
 import time
 from uuid import uuid4
 
+from kestrel.adapters.inbound.natural_language import incident_from_text
 from kestrel.adapters.outbound.llm import (
     DIAGNOSTIC_PROMPT,
     UnknownLlmProvider,
@@ -113,6 +120,27 @@ def cmd_llm_login(settings: Settings) -> int:
     print("signed in. Verifying the seat actually answers:")
     print("")
     return asyncio.run(cmd_llm_check(settings))
+
+
+async def cmd_report(settings: Settings, text: str, incident_id: str | None = None) -> int:
+    """Start a run from one sentence a person typed.
+
+    No model is called here: the run reads its own report in `triage`, with the
+    activity's retries and a recorded reason when it cannot. Starting it is the
+    only thing this command does, and the identity it prints is what a duplicate
+    submission would collide with.
+    """
+    try:
+        incident = incident_from_text(text, incident_id)
+    except ValueError as exc:
+        print(f"report failed: {exc}")
+        return 2
+
+    runs = TemporalRunGateway(settings)
+    handle = await submit_incident(runs, incident, settings.run_limits)
+    print(f"incident: {handle.incident_id}")
+    print(f"started {handle.workflow_id}")
+    return 0
 
 
 async def cmd_smoke(settings: Settings) -> int:
@@ -202,8 +230,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kestrel")
     parser.add_argument(
         "command",
-        choices=["provider-check", "llm-check", "llm-login", "smoke", "dynatrace-check"],
+        choices=["provider-check", "llm-check", "llm-login", "smoke", "report", "dynatrace-check"],
         help="`dynatrace-check` is a deprecated alias of `provider-check`",
+    )
+    parser.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="`report`: the sentence describing the incident, in your own words",
+    )
+    parser.add_argument(
+        "--id",
+        dest="incident_id",
+        default=None,
+        help="`report`: explicit incident id (default: derived from the sentence)",
     )
     args = parser.parse_args(argv)
     settings = get_settings()
@@ -215,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(cmd_llm_check(settings))
     if args.command == "llm-login":
         return cmd_llm_login(settings)
+    if args.command == "report":
+        return asyncio.run(cmd_report(settings, args.text, args.incident_id))
     return asyncio.run(cmd_smoke(settings))
 
 

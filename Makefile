@@ -16,7 +16,7 @@ MOUNT_SRC_RW = -v "$(CURDIR)/app/src:/app/src" -v "$(CURDIR)/app/tests:/app/test
 
 .DEFAULT_GOAL := help
 
-.PHONY: help init up up-all down reset logs ps temporal smoke test lint fmt sandbox psql redis-cli provider-check llm-login llm-check dynatrace-check
+.PHONY: help init up up-all down reset logs ps temporal smoke report test lint fmt sandbox psql redis-cli provider-check llm-login llm-check dynatrace-check
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -59,6 +59,10 @@ temporal: ## List workflows in the local Temporal server
 
 smoke: ## Full run against the local stack: start incident, approve, report
 	$(COMPOSE) exec $(SERVICE) python -m kestrel.adapters.inbound.cli smoke
+
+report: ## Start a run from a sentence: make report MSG="java-micronaut would not start"
+	@test -n "$(MSG)" || (echo 'usage: make report MSG="what happened, in your own words"' && exit 1)
+	$(COMPOSE) exec $(SERVICE) python -m kestrel.adapters.inbound.cli report "$(MSG)"
 
 test: ## Run the test suite against the working tree (works with the stack stopped)
 	$(NO_TRACING) $(COMPOSE) run --rm --no-deps $(MOUNT_SRC_RO) agent-worker pytest -q
