@@ -30,7 +30,7 @@ from kestrel.domain.policy import InvestigationScope
 
 
 class _NeverCalled:
-    def await_decision(self, *, incident_id: str, plan: object) -> None:
+    def await_decision(self, *, incident_id: str, plan: object, evidence: list[str]) -> None:
         raise AssertionError("the approval gateway must not be reached on this path")
 
 

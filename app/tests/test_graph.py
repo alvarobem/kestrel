@@ -238,5 +238,5 @@ def test_serde_covers_the_state_models() -> None:
 class _NeverCalled:
     """An approval gateway that fails loudly if the code path is not guarded."""
 
-    def await_decision(self, *, incident_id: str, plan: object) -> None:
+    def await_decision(self, *, incident_id: str, plan: object, evidence: list[str]) -> None:
         raise AssertionError("the approval gateway must not be reached on this path")

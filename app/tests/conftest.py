@@ -55,9 +55,14 @@ class StubApprovalGateway:
             approval if approval is not None else Approval(approved=True, actor="oncall")
         )
         self.calls: list[tuple[str, RemediationPlan]] = []
+        #: What the human was shown alongside the question.
+        self.evidence: list[str] = []
 
-    def await_decision(self, *, incident_id: str, plan: RemediationPlan) -> Approval:
+    def await_decision(
+        self, *, incident_id: str, plan: RemediationPlan, evidence: list[str]
+    ) -> Approval:
         self.calls.append((incident_id, plan))
+        self.evidence = list(evidence)
         return self.approval
 
 

@@ -81,6 +81,11 @@ Acceptance: the same log filter is counted over the incident window and over the
 it (same length, no gap); the item reports both counts and a trend that needs no unit; two empty windows
 produce no item, and a baseline failure is a NOTE that never costs the logs.
 
+**S15 — The approval gate shows the evidence behind the plan.**
+Acceptance: `ApprovalGateway.await_decision` receives the ranked short list and `pending_approval` returns it
+alongside the plan; the list is capped at five items with at most three of any kind, so one kind cannot bury
+the conclusion-level facts; the report prints the same list.
+
 ## Out of scope, stated on purpose
 
 Metrics and per-service log filtering. A wrong metric selector returns an empty result silently, and the
@@ -104,6 +109,7 @@ empty. They land in the next slice once we have seen the tenant's metric catalog
 | T11 | S12 | `domain/evidence.py` + merging in `investigate` + ranked `top_evidence` in the report | inline | done |
 | T12 | S13 | Retry only on `investigation_degraded`, not on an empty deterministic read | inline | done |
 | T13 | S14 | Error-volume baseline against the preceding equal window | inline | done |
+| T14 | S15 | Ranked evidence in the approval payload + per-kind cap in `select_top` | inline | done |
 
 ## Log
 
@@ -273,6 +279,25 @@ arrives, the repo and the sha are already in the event, so GitHub enrichment bec
 **Honest gap:** traces were evaluated and rejected for now (`fetch spans` returns 0 rows in 24h; the services
 run with `OTEL_TRACES_EXPORTER=none`), so the link from a log's `trace_id` to the failing downstream call is
 not available in this tenant.
+
+**L14 — the gate, and the ranking defect a live run exposed there.**
+The approval port now carries the evidence, and `pending_approval` publishes it with the plan.
+
+The live run immediately showed a flaw in the ranking rather than in the wiring: the first payload showed
+**five log lines and no baseline**. Pure rank order was doing what it was told — a log that mentions the
+service scores above a metric that does not — but the list a human reads is not the same as the list the
+planner consumes. `select_top` now fills it with a per-kind cap (three), which costs a couple of log variants
+and buys the fact that changes the decision. Verified on `PD-gate-2`:
+
+```
+[log]    order-handler: DBM-ROP Failed to retrieve airline information. (x11)
+[log]    order-handler: SSE-FAVL Failed to retrieve airport information…
+[metric] error log volume: 27787 in 30m vs 27395 before — 1.0x, steady
+[note]   triage placeholder: severity=error entities=1
+```
+
+An approver looking at that can reject a remediation aimed at a condition that has been steady for hours. Before
+this change they would have seen five error lines and had no way to know.
 
 **L8 — pending mirror.**
 Engram is unavailable in this session (`could not resolve an authoritative OpenCode runtime session`), so

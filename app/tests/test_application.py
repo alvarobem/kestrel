@@ -21,7 +21,7 @@ from kestrel.application import nodes
 from kestrel.application.deps import CoreDeps
 from kestrel.application.graph import NODE_FUNCTIONS
 from kestrel.config import Settings
-from kestrel.domain.models import Approval, Phase, RemediationPlan
+from kestrel.domain.models import Approval, Evidence, EvidenceKind, Phase, RemediationPlan
 from kestrel.domain.policy import (
     DEFAULT_MAX_INVESTIGATION_ATTEMPTS,
     DEFAULT_MAX_REMEDIATION_ATTEMPTS,
@@ -33,7 +33,7 @@ from kestrel.worker import build_app, build_deps
 class ExplodingGateway:
     """Fails loudly if the code path reaches the approval channel."""
 
-    def await_decision(self, *, incident_id: str, plan: Any) -> Approval:
+    def await_decision(self, *, incident_id: str, plan: Any, evidence: list[str]) -> Approval:
         raise AssertionError("nobody should be asked for a decision on this path")
 
 
@@ -83,7 +83,9 @@ def test_to_approval_reads_the_decision_payload() -> None:
 
 
 def test_auto_approval_names_itself() -> None:
-    approval = AutoApprovalGateway().await_decision(incident_id="i", plan=None)  # type: ignore[arg-type]
+    approval = AutoApprovalGateway().await_decision(  # type: ignore[arg-type]
+        incident_id="i", plan=None, evidence=[]
+    )
 
     assert approval.approved is True
     assert approval.actor == "auto"
@@ -203,3 +205,33 @@ def test_build_app_wraps_the_nodes_when_tracing_is_configured() -> None:
 
     for name in NODE_FUNCTIONS:
         assert name in app.nodes
+
+
+async def test_the_approval_shows_the_ranked_evidence(
+    state: dict, plan: RemediationPlan, approval_gateway: Any
+) -> None:
+    """A human asked to authorize an action must see what justifies it."""
+    state["plan"] = plan
+    state["evidence"] = [
+        Evidence(provider="kestrel", kind=EvidenceKind.NOTE, summary="bookkeeping"),
+        Evidence(
+            provider="dynatrace",
+            kind=EvidenceKind.ALERT,
+            summary="davis: checkout failing",
+            external_id="P-9",
+        ),
+        Evidence(
+            provider="dynatrace",
+            kind=EvidenceKind.LOG,
+            summary="order-handler: boom",
+            occurrences=7,
+        ),
+    ]
+
+    await nodes.approval_gate(state, CoreDeps(approval=approval_gateway))
+
+    shown = approval_gateway.evidence
+    # Ranked: the alert explains more than a log, and a note least of all.
+    assert shown[0].startswith("[alert] davis: checkout failing")
+    assert any("(x7)" in line for line in shown)
+    assert "bookkeeping" in shown[-1]

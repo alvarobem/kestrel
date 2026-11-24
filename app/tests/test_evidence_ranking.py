@@ -170,3 +170,34 @@ def test_newer_evidence_wins_a_tie() -> None:
     ranked = rank_evidence([old, new], _incident())
 
     assert ranked[0].collected_at > ranked[1].collected_at
+
+
+# --- the short list a human reads ------------------------------------------
+
+
+def test_the_human_list_keeps_the_kinds_mixed() -> None:
+    """Pure ordering let five log variants bury the baseline; the cap fixes that."""
+    from kestrel.domain.evidence import select_top
+
+    logs = [_log(f"distinct failure {index}") for index in range(8)]
+    baseline = Evidence(
+        provider="dynatrace",
+        kind=EvidenceKind.METRIC,
+        summary="error log volume: 27446 in 30m vs 27633 before — 1.0x, steady",
+    )
+    alert = Evidence(provider="dynatrace", kind=EvidenceKind.ALERT, summary="davis: checkout")
+
+    picked = select_top([*logs, baseline, alert], _incident(), limit=5, per_kind=2)
+
+    kinds = [item.kind for item in picked]
+    assert kinds.count(EvidenceKind.LOG) == 2
+    assert EvidenceKind.METRIC in kinds
+    assert EvidenceKind.ALERT in kinds
+
+
+def test_the_human_list_still_fills_up_when_only_one_kind_exists() -> None:
+    from kestrel.domain.evidence import select_top
+
+    picked = select_top([_log(f"m{index}") for index in range(5)], _incident(), limit=3)
+
+    assert len(picked) == 3

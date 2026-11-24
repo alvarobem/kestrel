@@ -19,7 +19,7 @@ from __future__ import annotations
 from kestrel.application.deps import CoreDeps
 from kestrel.application.errors import TelemetryUnavailable
 from kestrel.application.state import IncidentState
-from kestrel.domain.evidence import dedupe, merge_repeated, rank_evidence
+from kestrel.domain.evidence import dedupe, merge_repeated, select_top
 from kestrel.domain.models import (
     ActionRecord,
     Approval,
@@ -221,7 +221,11 @@ async def approval_gate(state: IncidentState, deps: CoreDeps) -> dict:
     if plan is None:
         return {"phase": Phase.AWAITING_APPROVAL, "notes": ["approval gate reached with no plan"]}
 
-    decision = deps.approval.await_decision(incident_id=state["incident"].id, plan=plan)
+    incident = state["incident"]
+    evidence = _top_evidence(dedupe(state.get("evidence") or []), incident)
+    decision = deps.approval.await_decision(
+        incident_id=incident.id, plan=plan, evidence=evidence
+    )
     return {"phase": Phase.AWAITING_APPROVAL, "approvals": [decision]}
 
 
@@ -348,10 +352,10 @@ async def report(state: IncidentState, deps: CoreDeps) -> dict:
 
 
 def _top_evidence(evidence: list[Evidence], incident, *, limit: int = 5) -> list[str]:
-    """The short lines a human reads first in the report."""
+    """The short lines a human reads first — in the report and at the approval gate."""
     return [
         f"[{item.kind}] {item.summary}" + (f" (x{item.occurrences})" if item.occurrences > 1 else "")
-        for item in rank_evidence(evidence, incident, limit=limit)
+        for item in select_top(evidence, incident, limit=limit)
     ]
 
 

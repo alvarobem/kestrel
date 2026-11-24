@@ -118,6 +118,38 @@ def rank_evidence(
     return ranked[:limit] if limit is not None else ranked
 
 
+def select_top(
+    items: list[Evidence],
+    incident: Incident,
+    *,
+    limit: int = 5,
+    per_kind: int = 3,
+) -> list[Evidence]:
+    """The short list a human reads, keeping the kinds mixed.
+
+    Pure ranking is not enough for a human-facing list: a dozen log lines collapse
+    into a handful of distinct messages, and those beat everything else, so the
+    conclusion-level facts — a metric ratio, a baseline, an alert — fall off the end
+    of a top-5. A live run showed exactly that: the approver was shown five log
+    lines and no baseline.
+
+    So the list is filled in rank order with a cap per kind. The cap is the point:
+    it costs a couple of log variants and buys the fact that changes the decision.
+    """
+    picked: list[Evidence] = []
+    seen: dict[EvidenceKind, int] = {}
+
+    for item in rank_evidence(items, incident):
+        if seen.get(item.kind, 0) >= per_kind:
+            continue
+        picked.append(item)
+        seen[item.kind] = seen.get(item.kind, 0) + 1
+        if len(picked) >= limit:
+            break
+
+    return picked
+
+
 def _score(item: Evidence, incident: Incident) -> float:
     score = _KIND_WEIGHT.get(item.kind, 0.2)
     if _mentions_incident(item, incident):

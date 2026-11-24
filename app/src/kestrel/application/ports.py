@@ -73,11 +73,19 @@ class ApprovalGateway(Protocol):
     once per plan attempt and receives one `Approval`. How the wait survives a
     restart (or a redeploy) is the adapter's problem.
 
+    `evidence` travels with the question because a decision without context is a
+    rubber stamp: the approver is being asked to authorize an action, and the
+    facts that justify it have to be in front of them, not three queries away.
+    They are short ranked lines — the same ones the report prints — so the payload
+    stays small enough to show in a chat message or a UI panel.
+
     The call is synchronous on purpose: the production adapter is a graph
     interruption, which is control flow rather than I/O.
     """
 
-    def await_decision(self, *, incident_id: str, plan: RemediationPlan) -> Approval: ...
+    def await_decision(
+        self, *, incident_id: str, plan: RemediationPlan, evidence: list[str]
+    ) -> Approval: ...
 
 
 @runtime_checkable

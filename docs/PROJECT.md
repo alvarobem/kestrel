@@ -198,6 +198,17 @@ The workflow `IncidentWorkflow` runs the graph and owns the loop:
    execution that failed closed, cannot change anything. Approvals accumulate
    across attempts, so only the latest one authorizes the plan on the table.
 
+**The question carries the evidence.** The pending approval publishes more than the
+plan: `pending_approval` returns `incident_id`, `plan`, `question` and `evidence` —
+the ranked short list, capped at five with at most three of any kind. The cap is
+deliberate: a dozen error lines collapse into a handful of distinct messages and
+those outrank everything else, so without it the approver was shown five log lines
+and no baseline. A live run made that concrete — the human now sees
+`error log volume: 27787 in 30m vs 27395 before — 1.0x, steady` next to the plan
+that would otherwise look justified by a stream of errors. Authorizing an action
+without the facts behind it is a rubber stamp, and the human-in-the-loop is the
+one place where that cannot be allowed.
+
 Attempts are bounded (`max_investigation_attempts`, `max_remediation_attempts`),
 snapshotted into state when the run starts so the routers never read settings.
 That way a bad hypothesis cannot loop forever, and replayed history cannot

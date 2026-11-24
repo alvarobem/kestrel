@@ -39,11 +39,16 @@ def to_approval(decision: object) -> Approval:
 class GraphApprovalGateway:
     """Suspends the graph until a human decision resumes it."""
 
-    def await_decision(self, *, incident_id: str, plan: RemediationPlan) -> Approval:
+    def await_decision(
+        self, *, incident_id: str, plan: RemediationPlan, evidence: list[str]
+    ) -> Approval:
         payload: Any = interrupt(
             {
                 "incident_id": incident_id,
                 "plan": plan.model_dump(mode="json"),
+                # What the plan is based on. An approver who cannot see this is
+                # authorizing a command, not a decision.
+                "evidence": list(evidence),
                 "question": "Approve this remediation plan?",
             }
         )
@@ -53,7 +58,9 @@ class GraphApprovalGateway:
 class AutoApprovalGateway:
     """Records an approval nobody gave. Local smoke tests only."""
 
-    def await_decision(self, *, incident_id: str, plan: RemediationPlan) -> Approval:
+    def await_decision(
+        self, *, incident_id: str, plan: RemediationPlan, evidence: list[str]
+    ) -> Approval:
         return Approval(
             approved=True,
             actor="auto",
