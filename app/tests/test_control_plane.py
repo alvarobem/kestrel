@@ -10,6 +10,7 @@ Two things are being proven here:
 
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import pytest
@@ -282,8 +283,28 @@ def test_the_cli_still_rejects_a_sentence_where_it_means_nothing() -> None:
     assert excinfo.value.code == 2
 
 
-def test_the_cli_refuses_a_report_with_no_words() -> None:
+def test_the_cli_refuses_a_report_with_no_words(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["report", "   ", "--id", "PD-1"]) == 2
+    # The message is part of the interface: it is what tells the operator why.
+    assert "a report needs some words" in capsys.readouterr().out
+
+
+def test_the_report_verb_reads_the_sentence_from_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrapper must not interpolate the words: stdin is the intact channel."""
+    monkeypatch.setattr("sys.stdin", io.StringIO("  ayer no arrancaba java-micronaut \n"))
+
+    assert cli.report_text("-") == "  ayer no arrancaba java-micronaut \n"
+    assert cli.report_text("literal words") == "literal words"
+
+
+def test_the_cli_refuses_a_report_with_no_words_on_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("   \n"))
+
+    assert cli.main(["report", "-"]) == 2
 
 
 # --- webhook ingestion is per provider -------------------------------------

@@ -95,6 +95,15 @@ def test_an_over_long_report_is_refused_before_it_becomes_state() -> None:
     assert len(longest_ok.description) <= MAX_REPORT_CHARS
 
 
+def test_the_report_ceiling_is_inclusive() -> None:
+    """The edge is accepted, so a later `>=` cannot pass this suite unnoticed."""
+    exactly = "a" * MAX_REPORT_CHARS
+
+    assert len(incident_from_text(exactly).description) == MAX_REPORT_CHARS
+    with pytest.raises(ValueError):
+        incident_from_text(exactly + "a")
+
+
 # --- the model's reading is normalized, not trusted -------------------------
 
 

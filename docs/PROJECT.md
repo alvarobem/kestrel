@@ -399,10 +399,12 @@ report about yesterday reads the same window any other incident would.
 The report itself is bounded too, and refused rather than truncated past
 `MAX_REPORT_CHARS` (4000): the sentence is durable state, re-serialized on every
 transition, so a pasted log dump is a payload problem wearing a report's clothes.
-`make report MSG="…"` passes the sentence through unexpanded and single-quoted —
-make would otherwise expand `$(…)` inside it and the shell would re-split its
-quotes, and because the words are the incident's identity, a rewritten sentence
-starts a run for a report nobody wrote.
+`cli report -` reads the sentence from standard input, and that is how
+`make report` passes it (`printf '%s' "…" | make report`): a recipe is expanded by
+make before the shell runs it, so text inside one is rewritten at best and, when
+it contains `$(shell …)`, executed on the host at worst — measured, not theorized.
+Since the words are the incident's identity, any rewrite starts a run for a report
+nobody wrote. The sentence never enters the recipe.
 
 **Scoping.** `DYNATRACE_SCOPE_TAGS` narrows investigation to the tags/management
 zones this prototype may reason about. It is frozen into `CoreDeps` as an

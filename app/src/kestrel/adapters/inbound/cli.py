@@ -122,6 +122,25 @@ def cmd_llm_login(settings: Settings) -> int:
     return asyncio.run(cmd_llm_check(settings))
 
 
+#: The argument that means "the sentence arrives on standard input". It exists so
+#: a wrapper (a Makefile target, a shell function) never has to interpolate the
+#: sentence into a command line, where make and the shell would rewrite it — or,
+#: for make, execute it.
+STDIN_ARGUMENT = "-"
+
+
+def report_text(argument: str) -> str:
+    """The sentence, from the argument or from standard input.
+
+    Standard input is the only channel where the words never appear in a command
+    line: nothing can expand them, re-split them or run them as a substitution
+    before the CLI sees them.
+    """
+    if argument == STDIN_ARGUMENT:
+        return sys.stdin.read()
+    return argument
+
+
 async def cmd_report(settings: Settings, text: str, incident_id: str | None = None) -> int:
     """Start a run from one sentence a person typed.
 
@@ -131,8 +150,8 @@ async def cmd_report(settings: Settings, text: str, incident_id: str | None = No
     submission would collide with.
     """
     try:
-        incident = incident_from_text(text, incident_id)
-    except ValueError as exc:
+        incident = incident_from_text(report_text(text), incident_id)
+    except (ValueError, OSError) as exc:
         print(f"report failed: {exc}")
         return 2
 
@@ -242,7 +261,10 @@ def main(argv: list[str] | None = None) -> int:
     ):
         commands.add_parser(name, help=summary)
     report = commands.add_parser("report", help="start a run from a sentence a person typed")
-    report.add_argument("text", help="the sentence describing the incident, in your own words")
+    report.add_argument(
+        "text",
+        help="the sentence, in your own words; `-` reads it from standard input",
+    )
     report.add_argument(
         "--id",
         dest="incident_id",
