@@ -27,11 +27,12 @@ from typing import Any, Protocol, runtime_checkable
 from kestrel.domain.models import (
     ActionRecord,
     Approval,
+    Evidence,
     Incident,
     RemediationPlan,
     RemediationStep,
 )
-from kestrel.domain.policy import RunLimits
+from kestrel.domain.policy import InvestigationScope, RunLimits
 
 # --- what a run looks like from the outside --------------------------------
 
@@ -89,6 +90,32 @@ class RemediationExecutor(Protocol):
     """
 
     async def execute(self, step: RemediationStep) -> ActionRecord: ...
+
+
+@runtime_checkable
+class TelemetryProvider(Protocol):
+    """Read-only view of one observability tool, as the investigation needs it.
+
+    Exactly one implementation is active per run, chosen in the composition
+    root. The core asks a question in its own vocabulary ("what do you know about
+    this incident, inside this scope?") and the adapter maps its vendor's nouns
+    onto `Evidence`.
+
+    Contract:
+      * returns `Evidence` for what it can see, and an empty list when the
+        incident is unknown to the tool — never a fabricated item;
+      * raises `TelemetryUnavailable` when it cannot answer, so the use case can
+        degrade the run with a recorded reason instead of guessing;
+      * is read-only. A provider never mutates the tool it reads from.
+    """
+
+    #: Stable, lowercase id. It is the value that selects this adapter and the
+    #: `provider` recorded on every `Evidence` it returns.
+    provider_id: str
+
+    async def investigate(
+        self, incident: Incident, scope: InvestigationScope
+    ) -> list[Evidence]: ...
 
 
 @runtime_checkable

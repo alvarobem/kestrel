@@ -14,7 +14,7 @@ exception handler.
 Endpoints:
     GET  /health
     POST /incidents                     start a run from a normalized incident
-    POST /incidents/webhook/dynatrace   start a run from a Dynatrace problem
+    POST /incidents/webhook/{provider}  start a run from that provider's payload
     GET  /incidents/{id}                status, phase and pending approval
     POST /incidents/{id}/resume         approve/reject the pending plan
 """
@@ -27,9 +27,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from kestrel.adapters.inbound.dynatrace_problem import problem_to_incident
+from kestrel.adapters.inbound.webhooks import UnknownIncidentProvider, incident_from_payload
 from kestrel.adapters.outbound.runs import TemporalRunGateway
 from kestrel.application.errors import (
     IncidentAlreadyRunning,
@@ -124,7 +124,7 @@ def health(request: Request) -> dict:
         "approval_mode": settings.approval_mode,
         "temporal_address": settings.temporal_address,
         "tracing_enabled": settings.tracing_enabled,
-        "dynatrace_configured": settings.dynatrace_configured,
+        "telemetry_provider": settings.telemetry_provider,
     }
 
 
@@ -134,13 +134,18 @@ async def create_incident(incident: Incident, request: Request) -> dict:
     return _handle_payload(handle)
 
 
-@app.post("/incidents/webhook/dynatrace", status_code=202)
-async def create_from_dynatrace(problem: dict, request: Request) -> dict:
+@app.post("/incidents/webhook/{provider}", status_code=202)
+async def create_from_provider(provider: str, payload: dict, request: Request) -> dict:
     try:
-        incident = problem_to_incident(problem)
-    except Exception as exc:
-        # An unexpected payload shape is a client error, not a server error.
-        raise HTTPException(status_code=422, detail=f"unsupported problem payload: {exc}") from exc
+        incident = incident_from_payload(provider, payload)
+    except UnknownIncidentProvider as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValidationError as exc:
+        # A payload the vendor sent that does not fit the contract is a client
+        # error, not a server error.
+        raise HTTPException(
+            status_code=422, detail=f"unsupported {provider} payload: {exc.error_count()} error(s)"
+        ) from exc
     handle = await submit_incident(_runs(request), incident, request.app.state.limits)
     return _handle_payload(handle)
 

@@ -76,6 +76,7 @@ replaced.
 | Local runtime | `temporalio/temporal` dev server | One container = server + UI, SQLite on a volume. Production points `TEMPORAL_ADDRESS` at Temporal Cloud or a cluster |
 | Reasoning | LangGraph + `temporalio-langgraph` | Explicit graph, conditional edges, interrupts mapped to signals |
 | Control plane | FastAPI | Stateless: start runs, read state, deliver approvals |
+| Telemetry | Pluggable provider, Dynatrace first | One adapter is active per run (`TELEMETRY_PROVIDER`); the core never names a vendor |
 | Tracing | Langfuse (opt-in profile) | One session per incident, one trace per node |
 | Execution | Isolated `sandbox` container | The agent must never touch production from its own process |
 
@@ -105,9 +106,9 @@ enforced by a test rather than by review:
 ```
 
 The application names what it needs (`application/ports.py`: an approval channel,
-an isolated executor, somewhere for runs to live) and receives it in `CoreDeps`,
-together with frozen policy values such as `dry_run`. Adapters decide how those
-needs are actually met. That is why a use case can be tested with a fake approval
+a telemetry provider, an isolated executor, somewhere for runs to live) and
+receives it in `CoreDeps`, together with frozen policy values such as `dry_run`
+and the investigation `scope`. Adapters decide how those needs are actually met. That is why a use case can be tested with a fake approval
 channel and a fake sandbox, and why `langgraph` appears in exactly one file of
 the core: the flow definition.
 
@@ -171,11 +172,11 @@ policy and audit entry.
 | --- | --- | --- | --- |
 | `receive` | Normalize payload, open the trail | no | state |
 | `triage` | Severity, scope, ownership, urgency | yes | `evidence` |
-| `investigate` | Pull and rank evidence from Dynatrace | optional | `evidence`, attempts |
+| `investigate` | Pull and rank evidence from the active provider | optional | `evidence`, attempts |
 | `plan` | Hypothesis + plan with rollback | yes | `hypothesis`, `plan` |
 | `approval_gate` | Suspend via `interrupt()`, record decision | no | `approvals` |
 | `execute` | Dispatch approved steps to the sandbox | no | `actions` |
-| `verify` | Re-query Dynatrace for recovery | optional | `verification` |
+| `verify` | Re-query the active provider for recovery | optional | `verification` |
 | `report` | Post-incident summary and follow-ups | yes | `report` |
 
 Cheap model for triage/investigation, stronger one for `plan`/`report`. Model
@@ -251,22 +252,42 @@ containers (Postgres, Redis, ClickHouse, object storage). `make up` runs the
 system; `make up-all` runs the system with tracing, and the agent degrades to
 untraced when the keys are absent.
 
-## 12. Dynatrace integration
+## 12. Telemetry integration: a plugin, Dynatrace first
+
+**The seam.** `TelemetryProvider` is a port: one `async investigate(incident,
+scope) -> list[Evidence]`. Exactly one adapter is active per run, chosen by
+`TELEMETRY_PROVIDER` from the registry in `adapters/outbound/providers.py`. An
+adapter maps its tool's facts onto the neutral `Evidence` vocabulary
+(`provider`, `kind`, `summary`, `external_id`, `confidence`), so a second tool is
+a new module plus one registry entry — never a change in `domain/` or
+`application/`. `tests/test_architecture.py` fails the build if a vendor noun
+reaches the core.
+
+**Dynatrace (the first adapter).** `adapters/outbound/dynatrace.py` is transport
+only (plain dicts); `dynatrace_provider.py` decides what becomes `Evidence`, what
+is inside the scope, and maps a transport failure onto `TelemetryUnavailable`.
+The incident's own problem record is reported as one `ALERT`; related events,
+DQL logs, metrics and evidence ranking are Roadmap Phase 1.
 
 **Auth.** OAuth client credentials (`POST /sso/oauth2/token`, scope
 `problems.read events.read logs.read metrics.read`) or an API token
-(`Authorization: Api-Token ...`), implemented in `adapters/outbound/dynatrace.py`. OAuth
-wins when client id/secret are set.
+(`Authorization: Api-Token ...`). OAuth wins when client id/secret are set. An
+adapter that has no credentials is not built at all, and the run degrades with a
+recorded reason instead of failing to start.
 
 **Ingestion.** Polling
 `GET /api/v2/problems?problemSelector=status("OPEN")&from=now-2h`, or a
-Dynatrace problem-notification webhook pointed at
-`POST /incidents/webhook/dynatrace`. Starting the same incident twice is
+problem-notification webhook pointed at `POST /incidents/webhook/{provider}`.
+The provider id selects a payload mapper in `adapters/inbound/webhooks.py`; an
+unknown id is a 404, never a guess. Starting the same incident twice is
 rejected by Temporal (`REJECT_DUPLICATE`), so a retrying webhook is safe.
 
 **Scoping.** `DYNATRACE_SCOPE_TAGS` narrows investigation to the tags/management
-zones this prototype may reason about. Set it: an agent reading every team's
-telemetry is a governance problem before it is a technical one.
+zones this prototype may reason about. It is frozen into `CoreDeps` as an
+`InvestigationScope` when the run starts, and the provider returns no evidence
+for an incident outside it — an operator editing `.env` does not change what an
+in-flight incident may read. Set it: an agent reading every team's telemetry is a
+governance problem before it is a technical one.
 
 **Read limits.** Cache evidence per run, never re-query the same window twice,
 treat 429 as backoff. Retries are bounded per activity.
@@ -317,11 +338,12 @@ runs, plugin activity options per node, API, CLI smoke, tests, docs. A dry run
 reports `resolved=false`: nothing was applied, so nothing was verified.
 
 **Phase 1 — real investigation.**
-Problem details, related events, logs (DQL), metrics; evidence ranking; real
-`dynatrace-check` against the tenant. This is where the telemetry read port is
-declared (`TelemetryReader` in `application/ports.py`), implemented in
-`adapters/outbound/`, and chosen in `worker.build_deps`: the node asks for
-evidence, it does not import `httpx`.
+Problem details, related events, logs (DQL), metrics; evidence ranking. The port
+and the provider seam already exist (`TelemetryProvider`, chosen in
+`worker.build_deps`; `make provider-check` proves the credentials), and today the
+Dynatrace adapter reports the incident's own problem record. Phase 1 is depth
+inside that adapter, plus per-run caching and 429 backoff: the node asks for
+evidence and never imports `httpx`.
 
 **Phase 2 — real planning.**
 LLM hypothesis generation, runbook retrieval, plan validation (reversible,
@@ -333,7 +355,8 @@ timeouts and captured output, wired in `worker.build_deps`. Still `DRY_RUN` by
 default. Add a timer-based verification window.
 
 **Phase 4 — verification and evals.**
-`verify` re-queries Dynatrace. Langfuse dataset of past incidents to score plan
+`verify` re-queries the active provider (a second method on `TelemetryProvider`).
+Langfuse dataset of past incidents to score plan
 quality. Temporal search attributes for incident-level queries.
 
 **Phase 5 — production shape.**
@@ -359,7 +382,7 @@ short-lived credentials, alerting on the agent itself.
 cp .env.example .env       # fill DYNATRACE_ENV_URL + OAuth client (or token)
 make up                    # Temporal + API + worker
 open http://localhost:8000/docs
-make dynatrace-check       # prove the tenant credentials work
+make provider-check        # prove the active telemetry provider can be read
 make test
 make smoke                 # start incident, approve, report
 

@@ -43,3 +43,18 @@ class RunUnavailable(ApplicationError):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+class TelemetryUnavailable(ApplicationError):
+    """The active telemetry provider could not answer.
+
+    The port contract names this error, so an adapter translates its own
+    transport failure into it and the use case stays free of vendor exception
+    hierarchies. `investigate` degrades on it; anything else is a bug and is
+    left to propagate.
+    """
+
+    def __init__(self, provider_id: str, detail: str) -> None:
+        super().__init__(f"{provider_id} telemetry unavailable: {detail}")
+        self.provider_id = provider_id
+        self.detail = detail

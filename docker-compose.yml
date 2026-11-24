@@ -31,6 +31,9 @@ x-agent-env: &agent-env
   LLM_BASE_URL: ${LLM_BASE_URL:-}
   LLM_API_KEY: ${LLM_API_KEY:-}
   LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
+  # Exactly one telemetry adapter is active; the registry lives in
+  # kestrel/adapters/outbound/providers.py.
+  TELEMETRY_PROVIDER: ${TELEMETRY_PROVIDER:-dynatrace}
   DYNATRACE_ENV_URL: ${DYNATRACE_ENV_URL:-}
   DYNATRACE_READ_TOKEN: ${DYNATRACE_READ_TOKEN:-}
   # DYNATRACE_WRITE_TOKEN is deliberately not injected here: no agent code path

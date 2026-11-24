@@ -17,11 +17,13 @@ non-dry-run action, and one audit record per executed step.
 from __future__ import annotations
 
 from kestrel.application.deps import CoreDeps
+from kestrel.application.errors import TelemetryUnavailable
 from kestrel.application.state import IncidentState
 from kestrel.domain.models import (
     ActionRecord,
     Approval,
     Evidence,
+    EvidenceKind,
     Hypothesis,
     IncidentReport,
     Phase,
@@ -87,7 +89,9 @@ async def triage(state: IncidentState, deps: CoreDeps) -> dict:
         "phase": Phase.TRIAGING,
         "evidence": [
             Evidence(
-                source="agent",
+                # The system's own classification, not a telemetry fact.
+                provider="kestrel",
+                kind=EvidenceKind.NOTE,
                 summary=(
                     f"triage placeholder: severity={incident.severity.value} "
                     f"entities={len(incident.affected_entities)}"
@@ -100,42 +104,68 @@ async def triage(state: IncidentState, deps: CoreDeps) -> dict:
 
 
 async def investigate(state: IncidentState, deps: CoreDeps) -> dict:
-    """Gather evidence from the telemetry source.
+    """Gather evidence from the active telemetry provider.
 
-    TODO(node): problem details, related events, logs (DQL) and metrics for the
-    affected entities, bounded by the scope tags. Read-only credential only.
+    TODO(node): the depth is Roadmap Phase 1 — related events, logs (DQL),
+    metrics and evidence ranking. What this node already owns is the contract:
+    it asks the port for facts inside the run's scope, records nothing it did not
+    receive, and turns a provider outage into recorded evidence instead of a
+    crashed incident.
 
-    The read port is not declared yet on purpose: this node is the only caller
-    and it is still a stub, so an interface here would have no implementation
-    and no behaviour. It arrives with Roadmap Phase 1, as a port, never as an
-    `httpx` import.
+    The provider is injected, never constructed: this module cannot name a vendor
+    and cannot import one, which is what makes a second tool an adapter change.
     """
     attempts = state.get("investigation_attempts", 0) + 1
-    if not deps.dynatrace_configured:
+    provider = deps.telemetry
+
+    if provider is None:
         return {
             "phase": Phase.INVESTIGATING,
             "investigation_attempts": attempts,
             "evidence": [
                 Evidence(
-                    source="dynatrace_problems",
-                    summary="Dynatrace is not configured; investigation degraded to the incident payload",
+                    provider="kestrel",
+                    kind=EvidenceKind.NOTE,
+                    summary=(
+                        "no telemetry provider is configured; investigation degraded to the "
+                        "incident payload"
+                    ),
                     confidence=0.2,
                 )
             ],
-            "notes": ["investigate is a stub and Dynatrace credentials are missing"],
+            "notes": ["investigate degraded: no telemetry provider is wired for this run"],
+        }
+
+    reason: str | None = None
+    try:
+        found = await provider.investigate(state["incident"], deps.scope)
+    except TelemetryUnavailable as exc:
+        found = []
+        reason = f"{provider.provider_id} could not answer: {exc.detail}"
+
+    if not found:
+        reason = reason or (
+            f"{provider.provider_id} returned no evidence for this incident inside the run scope"
+        )
+        return {
+            "phase": Phase.INVESTIGATING,
+            "investigation_attempts": attempts,
+            "evidence": [
+                Evidence(
+                    provider=provider.provider_id,
+                    kind=EvidenceKind.NOTE,
+                    summary=reason,
+                    confidence=0.0,
+                )
+            ],
+            "notes": [f"investigate degraded: {reason}"],
         }
 
     return {
         "phase": Phase.INVESTIGATING,
         "investigation_attempts": attempts,
-        "evidence": [
-            Evidence(
-                source="dynatrace_problems",
-                summary="investigation placeholder: no evidence collector wired yet",
-                confidence=0.0,
-            )
-        ],
-        "notes": ["TODO: wire the telemetry read port into the investigation node"],
+        "evidence": found,
+        "notes": [f"{provider.provider_id} returned {len(found)} evidence item(s)"],
     }
 
 
@@ -242,8 +272,8 @@ async def execute(state: IncidentState, deps: CoreDeps) -> dict:
 async def verify(state: IncidentState, deps: CoreDeps) -> dict:
     """Check whether the incident is actually gone.
 
-    TODO(node): re-query the telemetry source (problem closed, error rate back
-    to baseline) instead of trusting the executor's exit code.
+    TODO(node): re-query the active telemetry provider (problem closed, error
+    rate back to baseline) instead of trusting the executor's exit code.
 
     `ok` is never derived from `DRY_RUN`: a dry run applies nothing, so there is
     nothing to verify and claiming success would put a false resolution in the
@@ -264,11 +294,11 @@ async def verify(state: IncidentState, deps: CoreDeps) -> dict:
         "verification": Verification(
             ok=False,
             detail=(
-                "verification is not implemented: query Dynatrace before treating an "
-                "incident as resolved"
+                "verification is not implemented: query the active telemetry provider before "
+                "treating an incident as resolved"
             ),
         ),
-        "notes": ["verify reached without a Dynatrace check (not implemented yet)"],
+        "notes": ["verify reached without a telemetry check (not implemented yet)"],
     }
 
 

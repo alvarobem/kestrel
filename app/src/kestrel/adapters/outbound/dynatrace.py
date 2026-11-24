@@ -39,7 +39,11 @@ _OAUTH_SCOPE = "problems.read events.read logs.read metrics.read"
 
 
 class DynatraceError(RuntimeError):
-    pass
+    """Transport failure. `status_code` is set when the tenant answered at all."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class DynatraceClient:
@@ -84,7 +88,8 @@ class DynatraceClient:
         )
         if response.status_code != 200:
             raise DynatraceError(
-                f"oauth token request failed: {response.status_code} {response.text[:200]}"
+                f"oauth token request failed: {response.status_code} {response.text[:200]}",
+                status_code=response.status_code,
             )
 
         payload = response.json()
@@ -95,9 +100,14 @@ class DynatraceClient:
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict:
         response = self._http.get(path, params=params, headers=self._auth_headers())
         if response.status_code == 429:
-            raise DynatraceError("rate limited by Dynatrace (429); back off and retry")
+            raise DynatraceError(
+                "rate limited by Dynatrace (429); back off and retry", status_code=429
+            )
         if response.status_code >= 400:
-            raise DynatraceError(f"GET {path} -> {response.status_code}: {response.text[:300]}")
+            raise DynatraceError(
+                f"GET {path} -> {response.status_code}: {response.text[:300]}",
+                status_code=response.status_code,
+            )
         return response.json()
 
     # --- problems ----------------------------------------------------------
@@ -141,7 +151,10 @@ class DynatraceClient:
             headers=self._auth_headers(),
         )
         if response.status_code >= 400:
-            raise DynatraceError(f"DQL query failed: {response.status_code} {response.text[:300]}")
+            raise DynatraceError(
+                f"DQL query failed: {response.status_code} {response.text[:300]}",
+                status_code=response.status_code,
+            )
         return response.json()
 
     def close(self) -> None:

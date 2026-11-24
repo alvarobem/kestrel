@@ -3,20 +3,25 @@
 `CoreDeps` is the seam the application uses to stay framework-free. It carries
 two different things and that is deliberate:
 
-  * ports — the capabilities the core drives (`approval`, `executor`);
+  * ports — the capabilities the core drives (`approval`, `telemetry`, `executor`);
   * policy values — decisions already taken somewhere else, frozen here
-    (`dry_run`, `dynatrace_configured`).
+    (`dry_run`, `scope`).
 
 Policy values are values, not lookups: a node that reads `os.environ` is
 non-reproducible, and a router that does it diverges from Temporal's replay.
 The composition root reads settings once and freezes the outcome here.
+
+`telemetry` is one provider or `None`, never a list: exactly one observability
+tool is active per run, so evidence ranking across tools never enters the
+picture.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from kestrel.application.ports import ApprovalGateway, RemediationExecutor
+from kestrel.application.ports import ApprovalGateway, RemediationExecutor, TelemetryProvider
+from kestrel.domain.policy import InvestigationScope
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,10 +31,13 @@ class CoreDeps:
     approval: ApprovalGateway
     #: `DRY_RUN`: commands are rendered and audited, never executed.
     dry_run: bool = True
-    #: Whether a read-only telemetry source exists for this run. Until the
-    #: investigation port lands (Roadmap Phase 1) this is a capability flag,
-    #: not a client: the node reports what it could not gather.
-    dynatrace_configured: bool = False
+    #: The observability tool this run may read. `None` means none is configured
+    #: (or the configured one is missing credentials), and `investigate` records
+    #: that it degraded to the incident payload instead of pretending to have
+    #: evidence.
+    telemetry: TelemetryProvider | None = None
+    #: Policy value: what this run is allowed to read, frozen at start.
+    scope: InvestigationScope = field(default_factory=InvestigationScope)
     #: `None` means no isolated runner is available, so `execute` fails closed
     #: when the run is not a dry run.
     executor: RemediationExecutor | None = None

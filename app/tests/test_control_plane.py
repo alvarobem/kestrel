@@ -209,3 +209,49 @@ def test_api_forwards_an_approval_as_a_domain_decision(gateway: FakeRunGateway) 
         "alvaro",
         "go ahead",
     )
+
+
+# --- webhook ingestion is per provider -------------------------------------
+
+
+def test_api_maps_a_webhook_payload_through_the_provider_registry(
+    gateway: FakeRunGateway,
+) -> None:
+    with TestClient(app) as client:
+        app.state.runs = gateway
+        response = client.post(
+            "/incidents/webhook/dynatrace",
+            json={
+                "problemId": "P-9",
+                "title": "checkout slow",
+                "status": "OPEN",
+                "severityLevel": "ERROR",
+            },
+        )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["incident_id"] == "P-9"
+    assert body["workflow_id"] == "incident-P-9"
+    started_incident = gateway.started[0][0]
+    assert started_incident.source == "dynatrace"
+
+
+def test_api_refuses_a_webhook_for_an_unknown_provider(gateway: FakeRunGateway) -> None:
+    """An unmapped payload must not be guessed into an incident."""
+    with TestClient(app) as client:
+        app.state.runs = gateway
+        response = client.post("/incidents/webhook/datadog", json={"id": "x"})
+
+    assert response.status_code == 404
+    assert "datadog" in response.json()["detail"]
+    assert gateway.started == []
+
+
+def test_api_reports_a_payload_that_does_not_fit_the_contract(gateway: FakeRunGateway) -> None:
+    with TestClient(app) as client:
+        app.state.runs = gateway
+        response = client.post("/incidents/webhook/dynatrace", json={"problemId": ["bad"]})
+
+    assert response.status_code == 422
+    assert gateway.started == []

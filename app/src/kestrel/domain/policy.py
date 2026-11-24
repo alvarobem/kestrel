@@ -9,12 +9,43 @@ the operator-facing defaults, and the limits travel with the run inside
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_MAX_INVESTIGATION_ATTEMPTS = 3
 DEFAULT_MAX_REMEDIATION_ATTEMPTS = 2
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationScope:
+    """Which telemetry a run may reason about.
+
+    A governance decision, so it is a value frozen when the run starts, never a
+    setting read inside a node: an operator changing the scope must not change
+    what an in-flight incident is allowed to read.
+
+    An empty scope means unrestricted. That is the local-development default and
+    it is stated here rather than implied, because "no tags" and "every tag" are
+    dangerously easy to confuse.
+
+    The matching rule is deliberately coarse for now: a candidate (a management
+    zone name, a tag key or a tag value) is in scope when it equals one of the
+    configured tags, case-insensitively. Ranking evidence by relevance inside the
+    scope is Roadmap Phase 1.
+    """
+
+    tags: tuple[str, ...] = ()
+
+    @property
+    def unrestricted(self) -> bool:
+        return not self.tags
+
+    def allows(self, candidates: Iterable[str]) -> bool:
+        if self.unrestricted:
+            return True
+        wanted = {tag.strip().lower() for tag in self.tags if tag.strip()}
+        return any(candidate.strip().lower() in wanted for candidate in candidates if candidate)
 
 
 @dataclass(frozen=True, slots=True)

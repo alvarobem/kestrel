@@ -16,6 +16,7 @@ from kestrel.adapters.outbound.approval import (
     GraphApprovalGateway,
     to_approval,
 )
+from kestrel.adapters.outbound.providers import UnknownTelemetryProvider
 from kestrel.application import nodes
 from kestrel.application.deps import CoreDeps
 from kestrel.application.graph import NODE_FUNCTIONS
@@ -110,12 +111,12 @@ async def test_execute_uses_the_injected_executor(
 
 
 async def test_investigate_degrades_without_a_telemetry_source(state: dict) -> None:
-    deps = CoreDeps(approval=ExplodingGateway(), dynatrace_configured=False)
+    deps = CoreDeps(approval=ExplodingGateway())
 
     result = await nodes.investigate(state, deps)
 
     assert result["investigation_attempts"] == 1
-    assert "not configured" in result["evidence"][0].summary
+    assert "no telemetry provider" in result["evidence"][0].summary
 
 
 # --- run policy ------------------------------------------------------------
@@ -157,9 +158,32 @@ def test_build_deps_carries_the_policy_and_wires_no_executor() -> None:
     deps = build_deps(settings)
 
     assert deps.dry_run is True
-    assert deps.dynatrace_configured is True
+    assert deps.telemetry is not None
+    assert deps.telemetry.provider_id == "dynatrace"
+    # No scope tags configured: the run is unrestricted, and that is explicit.
+    assert deps.scope.unrestricted is True
     # Remediation stays unavailable until a sandbox executor exists.
     assert deps.executor is None
+
+
+def test_build_deps_degrades_when_the_provider_has_no_credentials() -> None:
+    deps = build_deps(Settings())
+
+    assert deps.telemetry is None
+
+
+def test_build_deps_freezes_the_scope_from_settings() -> None:
+    deps = build_deps(Settings(dynatrace_scope_tags="checkout, payments ,"))
+
+    assert deps.scope.tags == ("checkout", "payments")
+    assert deps.scope.allows(["payments"]) is True
+    assert deps.scope.allows(["other"]) is False
+
+
+def test_build_deps_refuses_an_unknown_telemetry_provider() -> None:
+    """A typo must fail at startup, not silently produce an evidence-free run."""
+    with pytest.raises(UnknownTelemetryProvider):
+        build_deps(Settings(telemetry_provider="nope"))
 
 
 def test_build_app_does_not_read_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:

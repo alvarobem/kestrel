@@ -1,6 +1,6 @@
 """Operator CLI.
 
-    python -m kestrel.adapters.inbound.cli dynatrace-check
+    python -m kestrel.adapters.inbound.cli provider-check
     python -m kestrel.adapters.inbound.cli smoke
 
 `smoke` starts a real workflow against the local Temporal server, waits for the
@@ -9,8 +9,9 @@ agent-worker to be running (`make up`).
 
 It is a driving adapter, so it goes through the same use cases as the HTTP
 control plane (`application/incidents.py`) instead of assembling a workflow
-start of its own. `dynatrace-check` is a diagnostic: it proves one credential
-works, which is why it constructs the read client itself.
+start of its own. `provider-check` is a diagnostic: it proves the configured
+telemetry provider can be read, which is why it asks the provider registry rather
+than naming a vendor.
 """
 
 from __future__ import annotations
@@ -22,8 +23,7 @@ import logging
 import sys
 from uuid import uuid4
 
-from kestrel.adapters.inbound.dynatrace_problem import problem_to_incident
-from kestrel.adapters.outbound.dynatrace import DynatraceClient
+from kestrel.adapters.outbound.providers import UnknownTelemetryProvider, describe_telemetry
 from kestrel.adapters.outbound.runs import TemporalRunGateway
 from kestrel.application.incidents import decide_incident, submit_incident
 from kestrel.config import Settings, get_settings
@@ -32,18 +32,16 @@ from kestrel.domain.models import Approval, Incident, Severity
 logger = logging.getLogger(__name__)
 
 
-def cmd_dynatrace_check(settings: Settings) -> int:
-    if not settings.dynatrace_configured:
-        print("Dynatrace is not configured (DYNATRACE_ENV_URL + token or client credentials)")
+def cmd_provider_check(settings: Settings) -> int:
+    print(f"telemetry provider: {settings.telemetry_provider}")
+    try:
+        readable, lines = describe_telemetry(settings)
+    except UnknownTelemetryProvider as exc:
+        print(exc)
         return 2
-
-    with DynatraceClient(settings) as client:
-        problems = client.list_open_problems(lookback="now-2h", page_size=5)
-        print(f"open problems in the last 2h: {len(problems)}")
-        for problem in problems:
-            incident = problem_to_incident(problem)
-            print(f"  - {incident.id} [{incident.severity.value}] {incident.title}")
-    return 0
+    for line in lines:
+        print(line)
+    return 0 if readable else 2
 
 
 async def cmd_smoke(settings: Settings) -> int:
@@ -99,13 +97,17 @@ async def cmd_smoke(settings: Settings) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kestrel")
-    parser.add_argument("command", choices=["dynatrace-check", "smoke"])
+    parser.add_argument(
+        "command",
+        choices=["provider-check", "smoke", "dynatrace-check"],
+        help="`dynatrace-check` is a deprecated alias of `provider-check`",
+    )
     args = parser.parse_args(argv)
     settings = get_settings()
     logging.basicConfig(level=settings.log_level.upper())
 
-    if args.command == "dynatrace-check":
-        return cmd_dynatrace_check(settings)
+    if args.command in {"provider-check", "dynatrace-check"}:
+        return cmd_provider_check(settings)
     return asyncio.run(cmd_smoke(settings))
 
 

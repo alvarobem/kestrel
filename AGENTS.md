@@ -5,9 +5,10 @@ Instructions for AI agents (and humans) working in this repository.
 ## What this is
 
 A **stateful multi-agent system for production incident triage and remediation**.
-It reads incidents from Dynatrace, investigates them, proposes a remediation
-plan, waits for human approval, executes through an isolated sandbox and
-verifies the outcome.
+It reads incidents from an observability tool, investigates them, proposes a
+remediation plan, waits for human approval, executes through an isolated sandbox
+and verifies the outcome. The tool is a plugin: exactly one is active per run,
+chosen by `TELEMETRY_PROVIDER`, and Dynatrace is the first adapter.
 
 The split that matters: **Temporal owns the process, LangGraph owns the
 reasoning.** Temporal is the only durable state. There is no application
@@ -47,7 +48,7 @@ docker compose up -d --scale agent-worker=3   # scale the thinking
 Endpoints: API http://localhost:8000/docs, Temporal UI http://localhost:8233,
 Langfuse http://localhost:3000 (only with `make up-all`).
 
-`python -m kestrel.adapters.inbound.cli dynatrace-check` proves the tenant credentials work.
+`make provider-check` proves the active telemetry provider can be read and shows what it sees.
 
 ## Layout
 
@@ -60,8 +61,9 @@ app/src/kestrel/
     models.py              entities crossing process boundaries
     policy.py              RunLimits + bounded-attempt defaults
   application/             use cases; no framework, no settings
-    ports.py               ApprovalGateway, RemediationExecutor, RunGateway
-    deps.py                CoreDeps: ports + frozen policy values
+    ports.py               ApprovalGateway, TelemetryProvider, RemediationExecutor,
+                           RunGateway
+    deps.py                CoreDeps: ports + frozen policy values (dry_run, scope)
     nodes.py               one function per lifecycle step
     state.py               IncidentState (Temporal-serializable)
     graph.py               flow: nodes, edges, per-node activity options
@@ -71,11 +73,14 @@ app/src/kestrel/
   adapters/
     inbound/               the world drives us
       api.py               stateless HTTP control plane
-      cli.py               smoke + dynatrace-check
+      cli.py               smoke + provider-check
       workflow.py          Temporal workflow: lifecycle, approval wait, signals
-      dynatrace_problem.py webhook payload -> Incident (inbound ACL)
+      webhooks.py          provider id -> payload mapper (inbound ACL registry)
+      dynatrace_problem.py Dynatrace payload -> Incident (one mapper)
     outbound/              we drive the world
-      dynatrace.py         Dynatrace read API, plain data only
+      providers.py         provider registry: TELEMETRY_PROVIDER -> adapter
+      dynatrace_provider.py Dynatrace as a TelemetryProvider (facts -> Evidence)
+      dynatrace.py         Dynatrace transport, plain data only
       approval.py          ApprovalGateway: graph interrupt + auto
       runs.py              RunGateway over Temporal, engine errors translated
       temporal.py          client + data converter
@@ -110,6 +115,7 @@ part of `make test`; treat a failure as a design error, not a test to relax.
 | Port | Method | Adapter |
 | --- | --- | --- |
 | `ApprovalGateway` | `await_decision(incident_id, plan) -> Approval` | `GraphApprovalGateway` (LangGraph `interrupt()`), `AutoApprovalGateway` (local smoke) |
+| `TelemetryProvider` | `async investigate(incident, scope) -> list[Evidence]` | `DynatraceTelemetryProvider` (`adapters/outbound/dynatrace_provider.py`), chosen by the registry in `adapters/outbound/providers.py` |
 | `RemediationExecutor` | `async execute(step) -> ActionRecord` | not wired yet: the sandbox decision (§13 of `docs/PROJECT.md`) |
 | `RunGateway` | `start` / `view` / `pending_approval` / `submit_decision` / `outcome` | `TemporalRunGateway` (`adapters/outbound/runs.py`) |
 
@@ -122,7 +128,7 @@ rules instead of each assembling a workflow start. An adapter may *construct*
 involves.
 
 A use case receives these in `CoreDeps`, together with frozen **policy values**
-(`dry_run`, `dynatrace_configured`). Reading `os.environ` from a node is a bug
+(`dry_run`, `scope`). Reading `os.environ` from a node is a bug
 even when it looks convenient: it makes a run non-reproducible and a replayed
 history diverge.
 
@@ -133,6 +139,7 @@ history diverge.
 | an entity, a guard-rail rule, a bounded limit | `domain/` |
 | a lifecycle step or a new use case | `application/nodes.py` + `graph.py` |
 | a capability the core needs | a `Protocol` in `application/ports.py`, implemented in `adapters/` |
+| support for another observability tool | `adapters/outbound/<tool>_provider.py` + one entry in `providers.py`; nothing in `domain/` or `application/` |
 | a control-plane operation (submit, read, decide) | a use case in `application/incidents.py` |
 | a vendor call, a transport, a mapping | `adapters/outbound/` (transport) or `adapters/inbound/` (payload → domain) |
 | a setting | `config.py`, then read it in `worker.build_deps` and pass the value inward |
@@ -201,6 +208,14 @@ history diverge.
     decision is legal and what an error means are the application's
     (`application/incidents.py`, typed errors in `application/errors.py`). If an
     adapter catches an engine exception, the rule has already leaked.
+15. **Telemetry is a port with one active adapter, and the core names no vendor.**
+    Exactly one provider is chosen per run in `worker.build_deps` from
+    `TELEMETRY_PROVIDER`; `domain/` and `application/` may not reference a vendor
+    in code (a test enforces it), and `Evidence.provider` records who produced
+    each fact. Adding a tool is a new adapter plus one registry entry. The scope
+    is a frozen policy value: a provider returns nothing for an incident outside
+    it, and an unconfigured provider degrades the run with a recorded reason
+    instead of failing it.
 
 ## Conventions
 
@@ -245,10 +260,15 @@ history diverge.
 - **New capability the core needs** (telemetry read, execution, notification):
   declare a `Protocol` in `application/ports.py`, add the field to `CoreDeps`,
   implement it in `adapters/outbound/`, and choose it in `worker.build_deps`.
-- **New Dynatrace signal**: method in `adapters/outbound/dynatrace.py` returning
-  plain data; the domain mapping/`Evidence` construction happens on the inbound
-  side or in the node that consumes it. The transport client never imports the
-  domain.
+- **Another observability tool**: implement `TelemetryProvider` in
+  `adapters/outbound/<tool>_provider.py` (map the vendor's facts onto `Evidence`,
+  apply `scope`, translate its transport failure into `TelemetryUnavailable`),
+  then add one `ProviderSpec` to `adapters/outbound/providers.py`. Add its
+  credentials to `config.py` and its payload mapper to
+  `adapters/inbound/webhooks.py`. No change in `domain/` or `application/`.
+- **A new signal from an existing provider**: extend that provider's
+  `investigate()`, returning plain domain `Evidence`. Depth lands there, not in
+  the node: `investigate` never names a vendor.
 - **Real LLM calls**: inside a node, so they get the activity's timeout and
   retry policy; keep prompts in Langfuse prompt management once stable; model
   output can never choose a command that bypasses the approval gate.

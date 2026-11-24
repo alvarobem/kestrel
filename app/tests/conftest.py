@@ -1,8 +1,9 @@
 """Shared fixtures and test doubles.
 
 The ports exist so a test can substitute them: `StubApprovalGateway` replaces
-the human-in-the-loop adapter and `StubExecutor` replaces the sandbox, neither
-of which a unit test should reach.
+the human-in-the-loop adapter, `StubExecutor` replaces the sandbox and
+`StubTelemetryProvider` replaces the observability tool. None of them is
+something a unit test should reach over the network.
 """
 
 from __future__ import annotations
@@ -14,11 +15,34 @@ from kestrel.application.state import initial_state
 from kestrel.domain.models import (
     ActionRecord,
     Approval,
+    Evidence,
     Hypothesis,
     Incident,
     RemediationPlan,
     RemediationStep,
 )
+from kestrel.domain.policy import InvestigationScope
+
+
+class StubTelemetryProvider:
+    """Answers with canned evidence, or with a recorded failure."""
+
+    provider_id = "stub"
+
+    def __init__(
+        self, evidence: list[Evidence] | None = None, error: Exception | None = None
+    ) -> None:
+        self.evidence = list(evidence or [])
+        self.error = error
+        self.calls: list[tuple[Incident, InvestigationScope]] = []
+
+    async def investigate(
+        self, incident: Incident, scope: InvestigationScope
+    ) -> list[Evidence]:
+        self.calls.append((incident, scope))
+        if self.error is not None:
+            raise self.error
+        return list(self.evidence)
 
 
 class StubApprovalGateway:
@@ -70,6 +94,11 @@ def make_gateway():
 @pytest.fixture
 def executor() -> StubExecutor:
     return StubExecutor()
+
+
+@pytest.fixture
+def telemetry() -> StubTelemetryProvider:
+    return StubTelemetryProvider()
 
 
 @pytest.fixture

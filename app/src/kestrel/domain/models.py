@@ -1,16 +1,24 @@
 """Domain entities shared by the graph, the API and the persistence layer.
 
-These are the shapes that cross process boundaries (Dynatrace, HTTP, the
-checkpoint store), so they are validated pydantic models rather than dicts.
+These are the shapes that cross process boundaries (a telemetry provider, HTTP,
+the checkpoint store), so they are validated pydantic models rather than dicts.
+
+Nothing here enumerates a vendor. A provider is identified by an opaque string
+id (`dynatrace`, `datadog`, ...), so connecting another tool is a new adapter,
+never a change to the vocabulary the whole system reasons with.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+#: A provider id: opaque and lowercase. It names *who produced a fact* — a
+#: telemetry adapter, but also `kestrel` itself, `human` or `runbook`.
+ProviderId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_.-]*$")]
 
 
 def _now() -> datetime:
@@ -50,7 +58,9 @@ class Incident(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    source: Literal["dynatrace", "manual"] = "manual"
+    #: Where the incident was ingested from. Provenance, not the tool a run is
+    #: configured to investigate with.
+    source: ProviderId = "manual"
     external_id: str | None = None
     title: str
     description: str = ""
@@ -64,15 +74,32 @@ class Incident(BaseModel):
     raw: dict = Field(default_factory=dict)
 
 
+class EvidenceKind(StrEnum):
+    """What kind of fact this is, independent of the tool that reported it.
+
+    Every provider maps its own nouns onto these: a Dynatrace "problem", a
+    Datadog "monitor" and a CloudWatch "alarm" are all `ALERT`.
+    """
+
+    ALERT = "alert"
+    EVENT = "event"
+    LOG = "log"
+    METRIC = "metric"
+    NOTE = "note"
+
+
 class Evidence(BaseModel):
     """One fact gathered while investigating. Every item keeps its provenance."""
 
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal[
-        "dynatrace_problems", "dynatrace_logs", "dynatrace_metrics", "runbook", "human", "agent"
-    ]
+    #: Who produced this fact: a telemetry provider id, or `kestrel`/`human`/
+    #: `runbook` for anything the system or a person contributed directly.
+    provider: ProviderId
+    kind: EvidenceKind
     summary: str
+    #: The provider-side handle, so a report can cite the item it read.
+    external_id: str | None = None
     payload: dict = Field(default_factory=dict)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     collected_at: datetime = Field(default_factory=_now)

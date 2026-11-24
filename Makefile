@@ -16,7 +16,7 @@ MOUNT_SRC_RW = -v "$(CURDIR)/app/src:/app/src" -v "$(CURDIR)/app/tests:/app/test
 
 .DEFAULT_GOAL := help
 
-.PHONY: help init up up-all down reset logs ps temporal smoke test lint fmt sandbox psql redis-cli dynatrace-check
+.PHONY: help init up up-all down reset logs ps temporal smoke test lint fmt sandbox psql redis-cli provider-check dynatrace-check
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -79,5 +79,8 @@ psql: ## psql into the Langfuse database (observability profile)
 redis-cli: ## redis-cli against Langfuse's Redis (observability profile)
 	$(COMPOSE) --profile observability exec redis redis-cli -a $${REDIS_PASSWORD:-devredis}
 
-dynatrace-check: ## Verify the Dynatrace credentials and list open problems
-	$(COMPOSE) exec $(SERVICE) python -m kestrel.adapters.inbound.cli dynatrace-check
+provider-check: ## Verify the active telemetry provider and list what it sees
+	$(COMPOSE) exec $(SERVICE) python -m kestrel.adapters.inbound.cli provider-check
+
+dynatrace-check: ## Deprecated alias of provider-check
+	@$(MAKE) --no-print-directory provider-check

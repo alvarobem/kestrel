@@ -19,6 +19,7 @@ STATE_TYPES: list[tuple[str, str]] = [
         "ActionRecord",
         "Approval",
         "Evidence",
+        "EvidenceKind",
         "Hypothesis",
         "Incident",
         "IncidentReport",

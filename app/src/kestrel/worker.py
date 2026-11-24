@@ -25,11 +25,13 @@ from temporalio.worker import Worker
 
 from kestrel.adapters.inbound.workflow import IncidentWorkflow
 from kestrel.adapters.outbound.approval import AutoApprovalGateway, GraphApprovalGateway
+from kestrel.adapters.outbound.providers import build_telemetry_provider
 from kestrel.adapters.outbound.temporal import connect
 from kestrel.adapters.outbound.tracing import flush_traces, trace_node
 from kestrel.application.deps import CoreDeps
 from kestrel.application.graph import GRAPH_NAME, build_graph
 from kestrel.config import Settings, get_settings
+from kestrel.domain.policy import InvestigationScope
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,8 @@ def build_deps(settings: Settings) -> CoreDeps:
 
     Reading `.env` happens here, once, outside the reasoning. From this point on
     the core sees values: `dry_run=True` is a fact of the run, not a lookup that
-    could change between two replays.
+    could change between two replays. The active telemetry provider is chosen
+    here too — and only here — so no node ever names a vendor or builds a client.
     """
     approval = (
         AutoApprovalGateway() if settings.approval_mode == "approved" else GraphApprovalGateway()
@@ -47,7 +50,10 @@ def build_deps(settings: Settings) -> CoreDeps:
     return CoreDeps(
         approval=approval,
         dry_run=settings.dry_run,
-        dynatrace_configured=settings.dynatrace_configured,
+        # `None` when the selected provider has no credentials: the run degrades
+        # and says so instead of failing to start.
+        telemetry=build_telemetry_provider(settings),
+        scope=InvestigationScope(tags=tuple(settings.scope_tags)),
         # No isolated executor exists yet, so `execute` fails closed when the
         # run is not a dry run. Wiring one is the sandbox decision (§13).
         executor=None,
@@ -82,14 +88,19 @@ async def main() -> None:
         plugins=[plugin],
     )
 
+    deps = build_deps(settings)
     logger.info(
-        "worker ready | temporal=%s namespace=%s queue=%s tracing=%s dry_run=%s approval=%s",
+        "worker ready | temporal=%s namespace=%s queue=%s tracing=%s dry_run=%s approval=%s "
+        "telemetry=%s configured=%s scope=%s",
         settings.temporal_address,
         settings.temporal_namespace,
         settings.temporal_task_queue,
         settings.tracing_enabled,
         settings.dry_run,
         settings.approval_mode,
+        settings.telemetry_provider,
+        deps.telemetry is not None,
+        ",".join(deps.scope.tags) or "unrestricted",
     )
 
     try:

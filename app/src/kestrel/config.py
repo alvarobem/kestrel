@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     dry_run: bool = True
     approval_mode: Literal["human", "approved"] = "human"
 
+    # Which telemetry adapter reads the incidents. Exactly one is active per
+    # run; the adapter registry lives in `adapters/outbound/providers.py`. The
+    # credentials below are that provider's own block, so a second tool adds its
+    # own names instead of reinterpreting these.
+    telemetry_provider: str = "dynatrace"
+
     llm_base_url: str | None = None
     llm_api_key: str | None = None
     llm_model: str = "gpt-4.1-mini"
@@ -62,13 +68,6 @@ class Settings(BaseSettings):
     @property
     def tracing_enabled(self) -> bool:
         return bool(self.langfuse_public_key and self.langfuse_secret_key)
-
-    @property
-    def dynatrace_configured(self) -> bool:
-        has_auth = bool(self.dynatrace_read_token) or bool(
-            self.dynatrace_client_id and self.dynatrace_client_secret
-        )
-        return bool(self.dynatrace_env_url) and has_auth
 
     @property
     def scope_tags(self) -> list[str]:
