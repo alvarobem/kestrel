@@ -71,6 +71,16 @@ read), `dedupe` (keeps the larger count across reads) and `rank_evidence` (kind 
 incident + capped repetition bonus); ranking never mutates `confidence`; `investigate` merges its own
 read, and `report` prints the top five ranked items.
 
+**S13 — A deterministic investigation is retried only when its provider failed.**
+Acceptance: `route_after_investigation` returns `investigate` only when
+`investigation_degraded` is set and attempts remain; an empty-but-successful read goes straight to
+`plan`, because re-running it re-reads the same window in the same second.
+
+**S14 — Error volume is compared against the preceding equal window.**
+Acceptance: the same log filter is counted over the incident window and over the span immediately before
+it (same length, no gap); the item reports both counts and a trend that needs no unit; two empty windows
+produce no item, and a baseline failure is a NOTE that never costs the logs.
+
 ## Out of scope, stated on purpose
 
 Metrics and per-service log filtering. A wrong metric selector returns an empty result silently, and the
@@ -92,6 +102,8 @@ empty. They land in the next slice once we have seen the tenant's metric catalog
 | T9 | S10 | Scope the log query to the incident's entities + environment, fail closed without one | inline | done |
 | T10 | S11 | Service metrics: failure ratio + trend per entity, absence tolerated | inline | done |
 | T11 | S12 | `domain/evidence.py` + merging in `investigate` + ranked `top_evidence` in the report | inline | done |
+| T12 | S13 | Retry only on `investigation_degraded`, not on an empty deterministic read | inline | done |
+| T13 | S14 | Error-volume baseline against the preceding equal window | inline | done |
 
 ## Log
 
@@ -245,6 +257,22 @@ should send the service or process group in the `entitySelector` instead of the 
 make the change correlatable for Davis too, not only for us. Until then the investigation stays at Davis
 problems, scoped error logs and service metrics, and no `ChangeSource` port is added. When attribution
 arrives, the repo and the sha are already in the event, so GitHub enrichment becomes one `compare` call.
+
+**L13 — two things a live run proved at once.**
+- The retry rule was burning work: an empty successful read went back through `investigate` up to
+  `max_investigation_attempts` (3), re-querying the same window in the same second. `route_after_investigation`
+  now loops only on `investigation_degraded` (the provider could not answer), still bounded by the snapshot.
+  Verified on `PD-base-1`: **1** investigate activity, where the earlier runs produced 3.
+- The baseline changed the reading of the incident. `error log volume: 27446 in 30m vs 27633 before — 1.0x,
+  steady`: the twelve sampled error lines were not a spike but the service's permanent state. That is the
+  difference between "something broke" and "this is how it always is", and it is the first evidence in the
+  pipeline that can tell them apart. Both counts come from the same filter, and the two windows are adjacent
+  and equal in length — a test asserts exactly that, because a longer or overlapping baseline would silently
+  produce a meaningless ratio.
+
+**Honest gap:** traces were evaluated and rejected for now (`fetch spans` returns 0 rows in 24h; the services
+run with `OTEL_TRACES_EXPORTER=none`), so the link from a log's `trace_id` to the failing downstream call is
+not available in this tenant.
 
 **L8 — pending mirror.**
 Engram is unavailable in this session (`could not resolve an authoritative OpenCode runtime session`), so

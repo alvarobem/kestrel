@@ -55,6 +55,11 @@ _LOG_DQL = (
     "| sort timestamp desc | limit {limit}"
 )
 
+#: The same filter, counted instead of listed: the volume of this incident's
+#: errors in one window. Two of these — the window and the one before it — answer
+#: "is this normal?", which no single-window number can.
+_LOG_COUNT_DQL = "fetch logs | filter {filters} | summarize n = count()"
+
 #: Service health for the incident's own entities. Verified against the tenant:
 #: `filter:` inside `timeseries` works and multi-metric returns one row of arrays.
 #: Not every service reports request metrics, so an empty answer is normal and is
@@ -229,15 +234,25 @@ class DynatraceTelemetryProvider:
             ]
 
         start, end = _window(incident)
-        logs_dql = _log_dql(targets, self._environment, _MAX_LOGS)
+        span = end - start
+        filters = _log_filters(targets, self._environment)
         metrics_dql = _metrics_dql(incident, start, end)
 
         problems, problem_error = await asyncio.to_thread(
-            _query, platform, _DAVIS_DQL.format(limit=_MAX_PROBLEMS), start.isoformat(),
-            end.isoformat(), _MAX_PROBLEMS
+            _query,
+            platform,
+            _DAVIS_DQL.format(limit=_MAX_PROBLEMS),
+            start.isoformat(),
+            end.isoformat(),
+            _MAX_PROBLEMS,
         )
         logs, log_error = await asyncio.to_thread(
-            _query, platform, logs_dql, start.isoformat(), end.isoformat(), _MAX_LOGS
+            _query,
+            platform,
+            _LOG_DQL.format(filters=filters, limit=_MAX_LOGS),
+            start.isoformat(),
+            end.isoformat(),
+            _MAX_LOGS,
         )
         metrics, metrics_error = (
             await asyncio.to_thread(
@@ -246,6 +261,16 @@ class DynatraceTelemetryProvider:
             if metrics_dql
             else ([], None)
         )
+
+        # The same filter, counted over the window and over the span before it.
+        count_dql = _LOG_COUNT_DQL.format(filters=filters)
+        current_rows, current_error = await asyncio.to_thread(
+            _query, platform, count_dql, start.isoformat(), end.isoformat(), 1
+        )
+        previous_rows, previous_error = await asyncio.to_thread(
+            _query, platform, count_dql, (start - span).isoformat(), start.isoformat(), 1
+        )
+        baseline_error = current_error or previous_error
 
         evidence: list[Evidence] = []
         notes: list[Evidence] = []
@@ -261,10 +286,20 @@ class DynatraceTelemetryProvider:
             if item is not None:
                 evidence.append(item)
 
+        if not baseline_error:
+            baseline = _baseline_evidence(
+                _count(current_rows),
+                _count(previous_rows),
+                max(1, int(span.total_seconds() // 60)),
+            )
+            if baseline is not None:
+                evidence.append(baseline)
+
         for label, error in (
             ("davis problems", problem_error),
             ("error logs", log_error),
             ("service metrics", metrics_error),
+            ("error baseline", baseline_error),
         ):
             if error:
                 notes.append(
@@ -421,12 +456,57 @@ def _dql_string(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _log_dql(targets: list[str], environment: str | None, limit: int) -> str:
-    """The error-log query, scoped to this incident and optionally to one environment."""
+def _log_filters(targets: list[str], environment: str | None) -> str:
+    """The error-log predicate, scoped to this incident and optionally to one environment."""
     clauses = ['loglevel == "ERROR"', f"({' or '.join(targets)})"]
     if environment:
         clauses.append(f"deployment.environment.name == {_dql_string(environment)}")
-    return _LOG_DQL.format(filters=" and ".join(clauses), limit=limit)
+    return " and ".join(clauses)
+
+
+def _log_dql(targets: list[str], environment: str | None, limit: int) -> str:
+    """The error-log query, scoped to this incident."""
+    return _LOG_DQL.format(filters=_log_filters(targets, environment), limit=limit)
+
+
+def _count(records: list[dict]) -> int:
+    """A `summarize count()` answer, which DQL returns as a string."""
+    for row in records:
+        try:
+            return int(float(row.get("n") or 0))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _baseline_evidence(current: int, previous: int, minutes: int) -> Evidence | None:
+    """Error volume now against the same span immediately before.
+
+    One number cannot say whether an incident is a change or the status quo: twelve
+    errors are a catastrophe against a baseline of zero and a quiet Tuesday against
+    a baseline of forty. The ratio is computed from two counts, so it needs no unit.
+    """
+    if not current and not previous:
+        return None
+
+    if not previous:
+        trend = "new (no errors in the preceding window)"
+    else:
+        ratio = current / previous
+        if ratio >= 1.5:
+            trend = f"{ratio:.1f}x, rising"
+        elif ratio <= 0.67:
+            trend = f"{ratio:.1f}x, falling"
+        else:
+            trend = f"{ratio:.1f}x, steady"
+
+    return Evidence(
+        provider=PROVIDER_ID,
+        kind=EvidenceKind.METRIC,
+        summary=f"error log volume: {current} in {minutes}m vs {previous} before — {trend}",
+        payload={"current": current, "previous": previous, "window_minutes": minutes},
+        confidence=0.7,
+    )
 
 
 def _record_scope_candidates(record: dict) -> list[str]:

@@ -48,6 +48,11 @@ class IncidentState(TypedDict, total=False):
     report: IncidentReport | None
 
     investigation_attempts: int
+    #: True only when the last investigation could not reach its provider. The
+    #: router retries on this and on nothing else: the queries are deterministic,
+    #: so a retry after "found nothing" would repeat the same read and cost the
+    #: same scan.
+    investigation_degraded: bool
     remediation_attempts: int
     notes: Annotated[list[str], add]
 
@@ -67,6 +72,7 @@ def initial_state(incident: Incident, limits: RunLimits | None = None) -> Incide
         verification=None,
         report=None,
         investigation_attempts=0,
+        investigation_degraded=False,
         remediation_attempts=0,
         notes=[],
     )

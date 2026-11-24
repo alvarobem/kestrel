@@ -203,6 +203,12 @@ snapshotted into state when the run starts so the routers never read settings.
 That way a bad hypothesis cannot loop forever, and replayed history cannot
 diverge because an operator changed `.env` between restarts.
 
+The investigation retry has exactly one trigger: the provider could not answer
+(`investigation_degraded`). The read is bounded and deterministic, so retrying an
+empty answer re-reads the same window in the same second and only spends the same
+scan again — the live runs were doing three identical attempts per incident before
+this rule.
+
 ## 9. Persistence and audit
 
 Temporal's event history is the only durable state. There is no application
@@ -294,6 +300,14 @@ this module asserting a unit it has not verified. The `rt` series travels raw in
 the payload. Not every service reports request metrics — one tenant's
 `order-handler` reports none while its logs are rich — so an empty answer is
 normal, not a fault, and produces no item.
+
+**Volume against a baseline, not in a vacuum.** The same log filter is counted
+twice: over the incident window and over the span immediately before it, equal in
+length and with no gap. Twelve errors are a catastrophe against a baseline of zero
+and a quiet Tuesday against a baseline of forty — the ratio is what makes the
+number mean something, and it needs no unit. A live run on `order-handler`
+returned `27446 in 30m vs 27633 before — 1.0x, steady`, which reframes an
+apparently alarming stream as the status quo.
 
 **Evidence is collapsed and ranked, not dumped.** `domain/evidence.py` holds the
 rules, pure and provider-free: `merge_repeated` turns N identical messages into one

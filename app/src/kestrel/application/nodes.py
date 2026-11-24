@@ -123,6 +123,7 @@ async def investigate(state: IncidentState, deps: CoreDeps) -> dict:
         return {
             "phase": Phase.INVESTIGATING,
             "investigation_attempts": attempts,
+            "investigation_degraded": False,
             "evidence": [
                 Evidence(
                     provider="kestrel",
@@ -143,6 +144,9 @@ async def investigate(state: IncidentState, deps: CoreDeps) -> dict:
     except TelemetryUnavailable as exc:
         found = []
         reason = f"{provider.provider_id} could not answer: {exc.detail}"
+        degraded = True
+    else:
+        degraded = False
 
     # One read, so summing repeats is honest: twelve identical lines are one
     # finding about volume, and state is checkpointed after every node.
@@ -155,6 +159,7 @@ async def investigate(state: IncidentState, deps: CoreDeps) -> dict:
         return {
             "phase": Phase.INVESTIGATING,
             "investigation_attempts": attempts,
+            "investigation_degraded": degraded,
             "evidence": [
                 Evidence(
                     provider=provider.provider_id,
@@ -169,6 +174,7 @@ async def investigate(state: IncidentState, deps: CoreDeps) -> dict:
     return {
         "phase": Phase.INVESTIGATING,
         "investigation_attempts": attempts,
+        "investigation_degraded": degraded,
         "evidence": found,
         "notes": [f"{provider.provider_id} returned {len(found)} evidence item(s)"],
     }
@@ -356,12 +362,20 @@ def _top_evidence(evidence: list[Evidence], incident, *, limit: int = 5) -> list
 
 
 async def route_after_investigation(state: IncidentState) -> str:
+    """Retry only what a retry can fix.
+
+    The investigation is a bounded, deterministic read: re-running it after an
+    empty answer re-reads the same window, in the same second, and its only
+    effect is to burn the same scan again (three identical attempts, twice over,
+    in the live runs). A retry earns its place when the provider could not answer
+    at all — that is `investigation_degraded`, and it is the only reason to loop.
+    The attempt bound still applies, so a provider that stays down cannot spin.
+    """
+    if not state.get("investigation_degraded"):
+        return "plan"
     attempts = state.get("investigation_attempts", 0)
     limit = state.get("max_investigation_attempts", DEFAULT_MAX_INVESTIGATION_ATTEMPTS)
-    best = max((e.confidence for e in state.get("evidence") or []), default=0.0)
-    if best < 0.6 and attempts < limit:
-        return "investigate"
-    return "plan"
+    return "investigate" if attempts < limit else "plan"
 
 
 async def route_after_approval(state: IncidentState) -> str:

@@ -21,6 +21,8 @@ from kestrel.application.state import initial_state
 from kestrel.domain.models import (
     ActionRecord,
     Approval,
+    Evidence,
+    EvidenceKind,
     Incident,
     Phase,
     RemediationPlan,
@@ -125,12 +127,23 @@ async def test_route_after_verify_does_not_retry_when_nothing_was_applied(state:
     assert await nodes.route_after_verify(state) == "report"
 
 
-async def test_route_after_investigation_is_bounded_by_the_snapshot(state: dict) -> None:
-    state["investigation_attempts"] = state["max_investigation_attempts"]
+async def test_an_empty_investigation_is_not_retried(state: dict) -> None:
+    """The read is deterministic: retrying "found nothing" re-reads the same window."""
+    state["evidence"] = [
+        Evidence(provider="dynatrace", kind=EvidenceKind.NOTE, summary="none", confidence=0.0)
+    ]
+    state["investigation_degraded"] = False
+
     assert await nodes.route_after_investigation(state) == "plan"
 
+
+async def test_a_provider_outage_is_retried_until_the_snapshot_runs_out(state: dict) -> None:
+    state["investigation_degraded"] = True
     state["investigation_attempts"] = 0
     assert await nodes.route_after_investigation(state) == "investigate"
+
+    state["investigation_attempts"] = state["max_investigation_attempts"]
+    assert await nodes.route_after_investigation(state) == "plan"
 
 
 async def test_routers_are_pure_and_take_no_dependencies(state: dict) -> None:

@@ -286,11 +286,14 @@ class FakePlatformClient:
         problems: list[dict] | None = None,
         logs: list[dict] | None = None,
         metrics: list[dict] | None = None,
+        counts: list[int] | None = None,
         errors: dict[str, Exception] | None = None,
     ) -> None:
         self.problems = problems or []
         self.logs = logs or []
         self.metrics = metrics or []
+        #: Answers for the two count queries, in order: current window, then baseline.
+        self.counts = list(counts or [])
         self.errors = errors or {}
         self.queries: list[dict] = []
         self.closed = False
@@ -300,11 +303,16 @@ class FakePlatformClient:
             kind = "davis"
         elif "timeseries" in query:
             kind = "metrics"
+        elif "summarize n = count()" in query:
+            kind = "count"
         else:
             kind = "logs"
         self.queries.append({"kind": kind, "start": start, "end": end, "query": query})
         if kind in self.errors:
             raise self.errors[kind]
+        if kind == "count":
+            value = self.counts.pop(0) if self.counts else 0
+            return [{"n": str(value)}]
         return {"davis": self.problems, "metrics": self.metrics, "logs": self.logs}[kind]
 
     def close(self) -> None:
@@ -681,3 +689,81 @@ async def test_the_report_lists_the_top_ranked_evidence(state: dict, deps: CoreD
     assert top[0].startswith("[alert]")
     assert any("(x4)" in line for line in top)
     assert "3 evidence item(s)" in result["report"].summary
+
+
+# --- baseline: is this normal? ---------------------------------------------
+
+
+async def test_the_baseline_compares_the_window_to_the_span_before_it() -> None:
+    platform = FakePlatformClient(counts=[37, 12])
+
+    found = await dynatrace_provider.DynatraceTelemetryProvider(platform=platform).investigate(  # type: ignore[arg-type]
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-1"]), InvestigationScope()
+    )
+
+    baseline = next(item for item in found if "error log volume" in item.summary)
+    assert "37 in 30m vs 12 before" in baseline.summary
+    assert "rising" in baseline.summary
+    assert baseline.kind == EvidenceKind.METRIC
+
+
+async def test_a_baseline_of_zero_is_reported_as_new_errors() -> None:
+    platform = FakePlatformClient(counts=[9, 0])
+
+    found = await dynatrace_provider.DynatraceTelemetryProvider(platform=platform).investigate(  # type: ignore[arg-type]
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-1"]), InvestigationScope()
+    )
+
+    baseline = next(item for item in found if "error log volume" in item.summary)
+    assert "new" in baseline.summary
+
+
+async def test_two_quiet_windows_produce_no_baseline_item() -> None:
+    platform = FakePlatformClient(counts=[0, 0])
+
+    found = await dynatrace_provider.DynatraceTelemetryProvider(platform=platform).investigate(  # type: ignore[arg-type]
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-1"]), InvestigationScope()
+    )
+
+    assert [item for item in found if "error log volume" in item.summary] == []
+
+
+async def test_the_baseline_queries_the_preceding_span() -> None:
+    from datetime import datetime
+
+    platform = FakePlatformClient(counts=[1, 1])
+
+    await dynatrace_provider.DynatraceTelemetryProvider(platform=platform).investigate(  # type: ignore[arg-type]
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-1"]), InvestigationScope()
+    )
+
+    counts = [q for q in platform.queries if q["kind"] == "count"]
+    assert len(counts) == 2
+    window_start, window_end = (
+        datetime.fromisoformat(counts[0]["start"]),
+        datetime.fromisoformat(counts[0]["end"]),
+    )
+    previous_start, previous_end = (
+        datetime.fromisoformat(counts[1]["start"]),
+        datetime.fromisoformat(counts[1]["end"]),
+    )
+    # The baseline ends exactly where the window starts: no gap, no overlap.
+    assert previous_end == window_start
+    # ...and it is the same length, or the ratio would compare different spans.
+    assert previous_end - previous_start == window_end - window_start
+
+
+async def test_a_baseline_failure_does_not_lose_the_logs() -> None:
+    from kestrel.adapters.outbound.dynatrace_platform import DynatracePlatformError
+
+    platform = FakePlatformClient(
+        logs=[_real_log_record()], errors={"count": DynatracePlatformError("count rejected")}
+    )
+
+    found = await dynatrace_provider.DynatraceTelemetryProvider(platform=platform).investigate(  # type: ignore[arg-type]
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-1"]), InvestigationScope()
+    )
+
+    assert [item for item in found if item.kind == EvidenceKind.LOG]
+    note = next(item for item in found if item.kind == EvidenceKind.NOTE)
+    assert "error baseline unavailable" in note.summary
