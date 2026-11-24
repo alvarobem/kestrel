@@ -106,7 +106,8 @@ enforced by a test rather than by review:
 ```
 
 The application names what it needs (`application/ports.py`: an approval channel,
-a telemetry provider, an isolated executor, somewhere for runs to live) and
+a telemetry provider, a model to reason with, an isolated executor, somewhere for
+runs to live) and
 receives it in `CoreDeps`, together with frozen policy values such as `dry_run`
 and the investigation `scope`. Adapters decide how those needs are actually met. That is why a use case can be tested with a fake approval
 channel and a fake sandbox, and why `langgraph` appears in exactly one file of
@@ -435,6 +436,11 @@ incident), per-run caching and 429 backoff.
 **Phase 2 — real planning.**
 LLM hypothesis generation, runbook retrieval, plan validation (reversible,
 rollback present, no wildcard targets). Prompts in Langfuse.
+Landed first: the transport. `LlmClient` is a port; in development it is answered
+by the developer's own GitHub Copilot seat over device OAuth (`make llm-login`,
+`make llm-check`), so there is no API key and no credit to spend. A deployment
+replaces the adapter with an organization-billed GitHub App instead — one entry in
+`adapters/outbound/llm.py`, no core change.
 
 **Phase 3 — controlled execution.**
 A `RemediationExecutor` adapter calls the sandbox, one action at a time, with

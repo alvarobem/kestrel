@@ -25,6 +25,7 @@ from temporalio.worker import Worker
 
 from kestrel.adapters.inbound.workflow import IncidentWorkflow
 from kestrel.adapters.outbound.approval import AutoApprovalGateway, GraphApprovalGateway
+from kestrel.adapters.outbound.llm import build_llm
 from kestrel.adapters.outbound.providers import build_telemetry_provider
 from kestrel.adapters.outbound.temporal import connect
 from kestrel.adapters.outbound.tracing import flush_traces, trace_node
@@ -57,6 +58,9 @@ def build_deps(settings: Settings) -> CoreDeps:
         # No isolated executor exists yet, so `execute` fails closed when the
         # run is not a dry run. Wiring one is the sandbox decision (§13).
         executor=None,
+        # `None` when the seat is not signed in: the planning nodes record that
+        # they could not reason instead of failing the run at boot.
+        llm=build_llm(settings),
     )
 
 
@@ -91,7 +95,7 @@ async def main() -> None:
     deps = build_deps(settings)
     logger.info(
         "worker ready | temporal=%s namespace=%s queue=%s tracing=%s dry_run=%s approval=%s "
-        "telemetry=%s configured=%s scope=%s",
+        "telemetry=%s configured=%s scope=%s llm=%s configured=%s model=%s",
         settings.temporal_address,
         settings.temporal_namespace,
         settings.temporal_task_queue,
@@ -101,6 +105,9 @@ async def main() -> None:
         settings.telemetry_provider,
         deps.telemetry is not None,
         ",".join(deps.scope.tags) or "unrestricted",
+        settings.llm_provider,
+        deps.llm is not None,
+        deps.llm.model_id if deps.llm is not None else "none",
     )
 
     try:

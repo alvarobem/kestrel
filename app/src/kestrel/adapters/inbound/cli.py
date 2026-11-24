@@ -1,6 +1,8 @@
 """Operator CLI.
 
     python -m kestrel.adapters.inbound.cli provider-check
+    python -m kestrel.adapters.inbound.cli llm-check
+    python -m kestrel.adapters.inbound.cli llm-login
     python -m kestrel.adapters.inbound.cli smoke
 
 `smoke` starts a real workflow against the local Temporal server, waits for the
@@ -11,7 +13,9 @@ It is a driving adapter, so it goes through the same use cases as the HTTP
 control plane (`application/incidents.py`) instead of assembling a workflow
 start of its own. `provider-check` is a diagnostic: it proves the configured
 telemetry provider can be read, which is why it asks the provider registry rather
-than naming a vendor.
+than naming a vendor. `llm-check` and `llm-login` are the same idea one layer
+over: they ask the LLM registry, so the operator never learns whether the seat,
+a key or a gateway is behind it.
 """
 
 from __future__ import annotations
@@ -21,10 +25,20 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from uuid import uuid4
 
+from kestrel.adapters.outbound.llm import (
+    DIAGNOSTIC_PROMPT,
+    UnknownLlmProvider,
+    build_llm,
+    describe_llm,
+    sign_in,
+    token_path,
+)
 from kestrel.adapters.outbound.providers import UnknownTelemetryProvider, describe_telemetry
 from kestrel.adapters.outbound.runs import TemporalRunGateway
+from kestrel.application.errors import LlmUnavailable
 from kestrel.application.incidents import decide_incident, submit_incident
 from kestrel.config import Settings, get_settings
 from kestrel.domain.models import Approval, Incident, Severity
@@ -42,6 +56,63 @@ def cmd_provider_check(settings: Settings) -> int:
     for line in lines:
         print(line)
     return 0 if readable else 2
+
+
+async def cmd_llm_check(settings: Settings) -> int:
+    """Prove the configured model answers, with the credential it was given."""
+    try:
+        usable, lines = describe_llm(settings)
+    except UnknownLlmProvider as exc:
+        print(exc)
+        return 2
+    for line in lines:
+        print(line)
+    if not usable:
+        return 2
+
+    client = build_llm(settings)
+    if client is None:  # `usable` and no client is a bug in the registry
+        print("llm-check failed: the registry reported a usable transport and built none")
+        return 2
+
+    started = time.perf_counter()
+    try:
+        answer = await client.complete(
+            system="You are a connectivity diagnostic. Answer in as few words as possible.",
+            user=DIAGNOSTIC_PROMPT,
+        )
+    except LlmUnavailable as exc:
+        print(exc)
+        print("hint: if the seat is not signed in yet, run `make llm-login` once")
+        return 2
+    elapsed = time.perf_counter() - started
+
+    print(f"answer:  {answer.strip()}")
+    print(f"latency: {elapsed:.1f}s")
+    return 0
+
+
+def cmd_llm_login(settings: Settings) -> int:
+    """Authorize the seat once, so no API key exists anywhere in this repo.
+
+    Synchronous on purpose: the device flow waits for a human, and the client
+    library refuses to run it inside an event loop. The proof comes after —
+    the same `llm-check` that the worker's transport is exercised with.
+    """
+    print(f"llm provider: {settings.llm_provider}")
+    print(f"token target: {token_path(settings)}")
+    print("")
+    print("Open https://github.com/login/device when the code appears below and")
+    print("approve it. This is a one-time step for this machine.")
+    print("")
+    try:
+        sign_in(settings)
+    except (UnknownLlmProvider, LlmUnavailable, OSError) as exc:
+        print(f"login failed: {exc}")
+        return 2
+    print("signed in. Verifying the seat actually answers:")
+    print("")
+    return asyncio.run(cmd_llm_check(settings))
 
 
 async def cmd_smoke(settings: Settings) -> int:
@@ -99,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kestrel")
     parser.add_argument(
         "command",
-        choices=["provider-check", "smoke", "dynatrace-check"],
+        choices=["provider-check", "llm-check", "llm-login", "smoke", "dynatrace-check"],
         help="`dynatrace-check` is a deprecated alias of `provider-check`",
     )
     args = parser.parse_args(argv)
@@ -108,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in {"provider-check", "dynatrace-check"}:
         return cmd_provider_check(settings)
+    if args.command == "llm-check":
+        return asyncio.run(cmd_llm_check(settings))
+    if args.command == "llm-login":
+        return cmd_llm_login(settings)
     return asyncio.run(cmd_smoke(settings))
 
 

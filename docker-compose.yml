@@ -28,9 +28,15 @@ x-agent-env: &agent-env
   TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-incident-workflow}
   DRY_RUN: ${DRY_RUN:-true}
   APPROVAL_MODE: ${APPROVAL_MODE:-human}
+  LLM_PROVIDER: ${LLM_PROVIDER:-copilot}
+  LLM_MODEL: ${LLM_MODEL:-github_copilot/gpt-4.1}
+  # The Copilot seat token lives on a volume, so it survives recreating the
+  # container. The client library reads GITHUB_COPILOT_TOKEN_DIR itself, so
+  # both names come from one variable and cannot drift.
+  LLM_TOKEN_DIR: ${LLM_TOKEN_DIR:-/data/copilot}
+  GITHUB_COPILOT_TOKEN_DIR: ${LLM_TOKEN_DIR:-/data/copilot}
   LLM_BASE_URL: ${LLM_BASE_URL:-}
   LLM_API_KEY: ${LLM_API_KEY:-}
-  LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
   # Exactly one telemetry adapter is active; the registry lives in
   # kestrel/adapters/outbound/providers.py.
   TELEMETRY_PROVIDER: ${TELEMETRY_PROVIDER:-dynatrace}
@@ -151,6 +157,11 @@ services:
     command: ["python", "-m", "kestrel.worker"]
     environment:
       <<: *agent-env
+    volumes:
+      # The seat token: written once by `make llm-login`, reused by every run.
+      # Only the worker gets it — the API never reasons (invariant 12), so the
+      # credential lives where the thinking happens and nowhere else.
+      - copilot_tokens:${LLM_TOKEN_DIR:-/data/copilot}
     stop_grace_period: 30s
 
   # -------------------------------------------------------------------------
@@ -339,6 +350,7 @@ volumes:
   clickhouse_logs:
   minio_data:
   sandbox_work:
+  copilot_tokens:
 
 networks:
   default:

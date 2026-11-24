@@ -58,3 +58,18 @@ class TelemetryUnavailable(ApplicationError):
         super().__init__(f"{provider_id} telemetry unavailable: {detail}")
         self.provider_id = provider_id
         self.detail = detail
+
+
+class LlmUnavailable(ApplicationError):
+    """The active LLM client could not answer.
+
+    Same shape as `TelemetryUnavailable` and for the same reason: a node that
+    cannot reason must degrade with a recorded reason, not invent a plan. The
+    adapter translates its own transport or auth failure into this error, so no
+    node ever catches an SDK exception.
+    """
+
+    def __init__(self, model_id: str, detail: str) -> None:
+        super().__init__(f"{model_id} unavailable: {detail}")
+        self.model_id = model_id
+        self.detail = detail

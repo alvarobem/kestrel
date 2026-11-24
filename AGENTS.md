@@ -50,6 +50,9 @@ Langfuse http://localhost:3000 (only with `make up-all`).
 
 `make provider-check` proves the active telemetry provider can be read and shows what it sees.
 
+`make llm-login` authorizes your GitHub Copilot seat once per machine (device
+OAuth, no API key); `make llm-check` proves the configured model answers.
+
 ## Layout
 
 The tree *is* the architecture: `domain` → `application` → `adapters`, and
@@ -84,6 +87,7 @@ app/src/kestrel/
       dynatrace_platform.py Dynatrace Grail/DQL transport (.apps + Bearer)
       dynatrace.py         Dynatrace classic API v2 transport (.live + Api-Token)
       approval.py          ApprovalGateway: graph interrupt + auto
+      llm.py               LlmClient registry: a personal Copilot seat (device OAuth)
       runs.py              RunGateway over Temporal, engine errors translated
       temporal.py          client + data converter
       tracing.py           per-node Langfuse traces, grouped by incident
@@ -118,6 +122,7 @@ part of `make test`; treat a failure as a design error, not a test to relax.
 | --- | --- | --- |
 | `ApprovalGateway` | `await_decision(incident_id, plan) -> Approval` | `GraphApprovalGateway` (LangGraph `interrupt()`), `AutoApprovalGateway` (local smoke) |
 | `TelemetryProvider` | `async investigate(incident, scope) -> list[Evidence]` | `DynatraceTelemetryProvider` (`adapters/outbound/dynatrace_provider.py`), chosen by the registry in `adapters/outbound/providers.py` |
+| `LlmClient` | `async complete(system, user) -> str` | `CopilotLlmClient` (`adapters/outbound/llm.py`): the developer's own Copilot seat over device OAuth, chosen by the registry in the same module |
 | `RemediationExecutor` | `async execute(step) -> ActionRecord` | not wired yet: the sandbox decision (§13 of `docs/PROJECT.md`) |
 | `RunGateway` | `start` / `view` / `pending_approval` / `submit_decision` / `outcome` | `TemporalRunGateway` (`adapters/outbound/runs.py`) |
 

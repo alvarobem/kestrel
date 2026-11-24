@@ -127,6 +127,33 @@ class TelemetryProvider(Protocol):
 
 
 @runtime_checkable
+class LlmClient(Protocol):
+    """Ask a model one question, in the application's own vocabulary.
+
+    The core asks for text and receives text. It does not know which vendor
+    answers, which SDK carries it, or whether the credential is an API key, a
+    developer's Copilot seat or a company gateway — that is the whole point of
+    the seam. Swapping one for another is a registry entry in
+    `adapters/outbound/llm.py`, never an edit in `nodes.py`.
+
+    Contract:
+      * returns the model's answer as text. Turning that text into a `Hypothesis`
+        or a `RemediationPlan` is the application's job: an adapter that parses
+        decided the meaning of the answer;
+      * raises `LlmUnavailable` when it cannot answer, so the node degrades with a
+        recorded reason instead of inventing a plan;
+      * an answer is never a decision. No model output may become a command that
+        skips the approval gate (AGENTS.md invariant 6).
+    """
+
+    #: Model id as the provider names it. Recorded for the audit trail and shown
+    #: by the operator diagnostic, so a run can always say what reasoned about it.
+    model_id: str
+
+    async def complete(self, *, system: str, user: str) -> str: ...
+
+
+@runtime_checkable
 class RunGateway(Protocol):
     """Where runs live: submit one, read one, decide one.
 

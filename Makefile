@@ -16,7 +16,7 @@ MOUNT_SRC_RW = -v "$(CURDIR)/app/src:/app/src" -v "$(CURDIR)/app/tests:/app/test
 
 .DEFAULT_GOAL := help
 
-.PHONY: help init up up-all down reset logs ps temporal smoke test lint fmt sandbox psql redis-cli provider-check dynatrace-check
+.PHONY: help init up up-all down reset logs ps temporal smoke test lint fmt sandbox psql redis-cli provider-check llm-login llm-check dynatrace-check
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -81,6 +81,14 @@ redis-cli: ## redis-cli against Langfuse's Redis (observability profile)
 
 provider-check: ## Verify the active telemetry provider and list what it sees
 	$(COMPOSE) exec $(SERVICE) python -m kestrel.adapters.inbound.cli provider-check
+
+llm-login: ## Once per machine: authorize your GitHub Copilot seat (device flow)
+	$(NO_TRACING) $(COMPOSE) run --rm -it agent-worker python -m kestrel.adapters.inbound.cli llm-login
+
+llm-check: ## Verify the configured LLM answers, and with what credential
+	# The worker, not $(SERVICE): the seat token lives on the worker's volume and
+	# the API never reasons.
+	$(COMPOSE) exec agent-worker python -m kestrel.adapters.inbound.cli llm-check
 
 dynatrace-check: ## Deprecated alias of provider-check
 	@$(MAKE) --no-print-directory provider-check

@@ -51,9 +51,24 @@ class Settings(BaseSettings):
     # own names instead of reinterpreting these.
     telemetry_provider: str = "dynatrace"
 
+    # Which LLM adapter reasons for the planning nodes. Exactly one is active
+    # per run, chosen by the registry in `adapters/outbound/llm.py` — the same
+    # shape as `telemetry_provider`, so the core never names a vendor.
+    #
+    # `copilot` is the development transport: a developer's own GitHub Copilot
+    # seat, authorized once by device OAuth. There is no API key to bill and
+    # nothing to paste into `.env`.
+    llm_provider: str = "copilot"
+    llm_model: str = "github_copilot/gpt-4.1"
+    #: Where the seat token lives. It must match `GITHUB_COPILOT_TOKEN_DIR`,
+    #: which compose derives from the same `LLM_TOKEN_DIR` variable: the client
+    #: library reads that variable itself, and a mismatch is a silent "please
+    #: log in again" on every restart.
+    llm_token_dir: str = "/data/copilot"
+    #: The gateway path (a company-approved endpoint, open decision §16.7). Not
+    #: used by the `copilot` adapter, kept because it is how phase 5 deploys.
     llm_base_url: str | None = None
     llm_api_key: str | None = None
-    llm_model: str = "gpt-4.1-mini"
 
     dynatrace_env_url: str | None = None
     dynatrace_read_token: str | None = None
