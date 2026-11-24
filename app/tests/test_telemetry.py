@@ -285,20 +285,27 @@ class FakePlatformClient:
         *,
         problems: list[dict] | None = None,
         logs: list[dict] | None = None,
+        metrics: list[dict] | None = None,
         errors: dict[str, Exception] | None = None,
     ) -> None:
         self.problems = problems or []
         self.logs = logs or []
+        self.metrics = metrics or []
         self.errors = errors or {}
         self.queries: list[dict] = []
         self.closed = False
 
     def execute(self, query: str, *, start=None, end=None, max_records=50, **_kw) -> list[dict]:
-        kind = "davis" if "davis" in query else "logs"
+        if "davis" in query:
+            kind = "davis"
+        elif "timeseries" in query:
+            kind = "metrics"
+        else:
+            kind = "logs"
         self.queries.append({"kind": kind, "start": start, "end": end, "query": query})
         if kind in self.errors:
             raise self.errors[kind]
-        return self.problems if kind == "davis" else self.logs
+        return {"davis": self.problems, "metrics": self.metrics, "logs": self.logs}[kind]
 
     def close(self) -> None:
         self.closed = True
@@ -554,3 +561,73 @@ async def test_an_entity_id_join_does_not_add_the_caveat() -> None:
     )
 
     assert [item.kind for item in found] == [EvidenceKind.LOG]
+
+
+# --- service metrics -------------------------------------------------------
+
+
+async def test_metric_evidence_reports_ratio_and_trend() -> None:
+    platform = FakePlatformClient(
+        metrics=[
+            {
+                "dt.entity.service": "SERVICE-30CF729466F91717",
+                "req": [1000.0, 1000.0, 1000.0],
+                "fails": [10.0, 10.0, 50.0],
+                "rt": [1000.0, 1100.0, 5000.0],
+            }
+        ]
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-30CF729466F91717"]), InvestigationScope()
+    )
+
+    metric = next(item for item in found if item.kind == EvidenceKind.METRIC)
+    assert "failure ratio 2.33%" in metric.summary
+    assert "(spiking)" in metric.summary
+    assert metric.external_id == "SERVICE-30CF729466F91717"
+
+
+async def test_a_service_without_request_metrics_produces_no_metric_evidence() -> None:
+    """Not every service reports request metrics; that is normal, not a fault."""
+    platform = FakePlatformClient(metrics=[])
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-30CF729466F91717"]), InvestigationScope()
+    )
+
+    assert [item for item in found if item.kind == EvidenceKind.METRIC] == []
+
+
+async def test_the_metrics_query_filters_by_the_incident_entities() -> None:
+    platform = FakePlatformClient()
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    await provider.investigate(
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-A", "SERVICE-B"]), InvestigationScope()
+    )
+
+    query = next(q["query"] for q in platform.queries if q["kind"] == "metrics")
+    assert 'dt.entity.service == "SERVICE-A"' in query
+    assert 'dt.entity.service == "SERVICE-B"' in query
+    assert " or " in query
+
+
+async def test_a_metrics_failure_does_not_lose_the_logs() -> None:
+    from kestrel.adapters.outbound.dynatrace_platform import DynatracePlatformError
+
+    platform = FakePlatformClient(
+        logs=[_real_log_record()],
+        errors={"metrics": DynatracePlatformError("metrics rejected")},
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t", entity_ids=["SERVICE-1"]), InvestigationScope()
+    )
+
+    assert [item for item in found if item.kind == EvidenceKind.LOG]
+    note = next(item for item in found if item.kind == EvidenceKind.NOTE)
+    assert "service metrics unavailable" in note.summary

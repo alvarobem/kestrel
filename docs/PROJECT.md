@@ -284,6 +284,17 @@ evidence for one incident is noise from other teams wearing a report's clothes.
 That is a real defect this prototype shipped once — the plan is built from
 evidence, so unrelated evidence is a wrong remediation waiting to be proposed.
 
+**Service metrics, when the service reports them.** Investigation adds one
+`METRIC` item per incident entity from
+`timeseries sum(dt.service.request.count), sum(dt.service.request.failure_count),
+avg(dt.service.request.response_time)` filtered by `dt.entity.service`. The claim
+is deliberately unit-free: a failure ratio (two counts) and a comparison of the
+latest interval against the earlier ones, so "spiking" means something without
+this module asserting a unit it has not verified. The `rt` series travels raw in
+the payload. Not every service reports request metrics — one tenant's
+`order-handler` reports none while its logs are rich — so an empty answer is
+normal, not a fault, and produces no item.
+
 **Environment is not a global setting, and must not become one.** A Dynatrace
 entity id (`SERVICE-30CF729466F91717`) exists in exactly one environment, so the
 incident itself carries the environment: the same agent investigates an incident
@@ -377,13 +388,12 @@ Temporal + LangGraph wired end to end, real approval signal, restart-durable
 runs, plugin activity options per node, API, CLI smoke, tests, docs. A dry run
 reports `resolved=false`: nothing was applied, so nothing was verified.
 
-**Phase 1 — real investigation.** *Partly landed.*
-The port, the provider seam and the platform transport exist: a run reads Davis
-problems and error logs over DQL, inside the incident's own time window, filtered
-by the run's scope, and `make provider-check` proves the credential in one
-command. Still to do: metrics (needs the tenant's metric catalogue — a wrong
-selector returns an empty result silently), per-service log filtering, evidence
-ranking, per-run caching and 429 backoff.
+**Phase 1 — real investigation.** *Landed, minus ranking and caching.*
+A run reads Davis problems, error logs scoped to the incident's own entities, and
+service metrics (failure ratio and trend) over DQL, inside the incident's time
+window and filtered by the run's scope. `make provider-check` proves the
+credential in one command. Still to do: evidence ranking (which item explains the
+incident), per-run caching and 429 backoff.
 
 **Phase 2 — real planning.**
 LLM hypothesis generation, runbook retrieval, plan validation (reversible,

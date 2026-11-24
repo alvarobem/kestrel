@@ -55,6 +55,18 @@ _LOG_DQL = (
     "| sort timestamp desc | limit {limit}"
 )
 
+#: Service health for the incident's own entities. Verified against the tenant:
+#: `filter:` inside `timeseries` works and multi-metric returns one row of arrays.
+#: Not every service reports request metrics, so an empty answer is normal and is
+#: not evidence of a fault.
+_METRICS_DQL = (
+    "timeseries req = sum(dt.service.request.count), "
+    "fails = sum(dt.service.request.failure_count), "
+    "rt = avg(dt.service.request.response_time), "
+    "by: {{dt.entity.service}}, filter: {{{entity_filter}}}, "
+    'from: "{start}", to: "{end}", interval: 5m'
+)
+
 #: What a scope tag may match on, from the semantic attributes tenants emit.
 _SCOPE_FIELDS = (
     "dt.security_context",
@@ -74,7 +86,9 @@ _MAX_WINDOW = timedelta(hours=6)
 _CONTEXT_BEFORE = timedelta(minutes=30)
 _MAX_PROBLEMS = 5
 _MAX_LOGS = 12
+_MAX_METRICS = 3
 _MAX_TEXT = 500
+_MAX_POINTS = 12
 
 
 def platform_configured(settings: Settings) -> bool:
@@ -216,12 +230,21 @@ class DynatraceTelemetryProvider:
 
         start, end = _window(incident)
         logs_dql = _log_dql(targets, self._environment, _MAX_LOGS)
+        metrics_dql = _metrics_dql(incident, start, end)
 
         problems, problem_error = await asyncio.to_thread(
-            _query, platform, _DAVIS_DQL.format(limit=_MAX_PROBLEMS), start, end, _MAX_PROBLEMS
+            _query, platform, _DAVIS_DQL.format(limit=_MAX_PROBLEMS), start.isoformat(),
+            end.isoformat(), _MAX_PROBLEMS
         )
         logs, log_error = await asyncio.to_thread(
-            _query, platform, logs_dql, start, end, _MAX_LOGS
+            _query, platform, logs_dql, start.isoformat(), end.isoformat(), _MAX_LOGS
+        )
+        metrics, metrics_error = (
+            await asyncio.to_thread(
+                _query, platform, metrics_dql, start.isoformat(), end.isoformat(), _MAX_METRICS
+            )
+            if metrics_dql
+            else ([], None)
         )
 
         evidence: list[Evidence] = []
@@ -233,8 +256,16 @@ class DynatraceTelemetryProvider:
         for record in logs:
             if scope.allows(_record_scope_candidates(record)):
                 evidence.append(_log_evidence(record))
+        for record in metrics:
+            item = _metric_evidence(record)
+            if item is not None:
+                evidence.append(item)
 
-        for label, error in (("davis problems", problem_error), ("error logs", log_error)):
+        for label, error in (
+            ("davis problems", problem_error),
+            ("error logs", log_error),
+            ("service metrics", metrics_error),
+        ):
             if error:
                 notes.append(
                     Evidence(
@@ -325,7 +356,7 @@ def _query(
 # --- helpers ---------------------------------------------------------------
 
 
-def _window(incident: Incident) -> tuple[str, str]:
+def _window(incident: Incident) -> tuple[datetime, datetime]:
     """The window an incident is explained by: context before it, up to now.
 
     Opening at `started_at` is wrong — a synthetic or just-fired incident has no
@@ -337,8 +368,31 @@ def _window(incident: Incident) -> tuple[str, str]:
     started = incident.started_at
     if started.tzinfo is None:
         started = started.replace(tzinfo=UTC)
-    start = max(min(started, now) - _CONTEXT_BEFORE, now - _MAX_WINDOW)
-    return start.isoformat(), now.isoformat()
+    return max(min(started, now) - _CONTEXT_BEFORE, now - _MAX_WINDOW), now
+
+
+def _dql_instant(moment: datetime) -> str:
+    """A DQL timestamp literal. `Z`, not `+00:00`: the query parser is stricter."""
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _metrics_dql(incident: Incident, start: datetime, end: datetime) -> str | None:
+    """Service health for the incident's entities, or `None` when there is none to ask about."""
+    if not incident.entity_ids:
+        return None
+    entity_filter = " or ".join(
+        f"dt.entity.service == {_dql_string(entity_id)}" for entity_id in incident.entity_ids
+    )
+    return _METRICS_DQL.format(
+        entity_filter=entity_filter, start=_dql_instant(start), end=_dql_instant(end)
+    )
+
+
+def _series(values: object) -> list[float]:
+    """The numeric points of a timeseries array, dropping the empty buckets."""
+    if not isinstance(values, list):
+        return []
+    return [float(value) for value in values if isinstance(value, (int, float))]
 
 
 def _target_conditions(incident: Incident) -> list[str]:
@@ -428,6 +482,56 @@ def _log_evidence(record: dict) -> Evidence:
         external_id=str(record["trace_id"]) if record.get("trace_id") else None,
         payload=_project(record, ("timestamp", "loglevel", "service.name", "content")),
         confidence=0.6,
+    )
+
+
+def _metric_evidence(record: dict) -> Evidence | None:
+    """Failure ratio and trend from the service's own request metrics.
+
+    Everything claimed here is unit-free arithmetic on the arrays the tenant
+    returned: a ratio of two counts and a comparison between buckets. The raw
+    `rt` series travels in the payload without a unit assertion, because the unit
+    is Dynatrace's to define and this module has not verified it.
+    """
+    requests = _series(record.get("req"))
+    failures = _series(record.get("fails"))
+    if not requests and not failures:
+        return None
+
+    total_requests = sum(requests)
+    total_failures = sum(failures)
+    parts: list[str] = []
+    if total_requests:
+        parts.append(
+            f"failure ratio {total_failures / total_requests * 100:.2f}% "
+            f"({total_failures:,.0f} of {total_requests:,.0f})"
+        )
+    elif total_failures:
+        parts.append(f"{total_failures:,.0f} failures")
+
+    if len(failures) >= 2:
+        latest = failures[-1]
+        baseline = sum(failures[:-1]) / len(failures[:-1])
+        trend = "spiking" if baseline and latest > 2 * baseline else "steady"
+        parts.append(
+            f"failures/interval {latest:,.0f} vs baseline {baseline:,.0f} ({trend})"
+        )
+
+    if not parts:
+        return None
+
+    entity_id = str(record.get("dt.entity.service") or "service")
+    return Evidence(
+        provider=PROVIDER_ID,
+        kind=EvidenceKind.METRIC,
+        summary=f"{entity_id}: {'; '.join(parts)}",
+        external_id=entity_id,
+        payload={
+            "req": requests[-_MAX_POINTS:],
+            "fails": failures[-_MAX_POINTS:],
+            "rt": _series(record.get("rt"))[-_MAX_POINTS:],
+        },
+        confidence=0.75,
     )
 
 

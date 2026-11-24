@@ -58,6 +58,13 @@ Acceptance: the log query joins on the incident's entity ids (`dt.entity.service
 `service.name`) and optionally on `DYNATRACE_ENVIRONMENT`; an incident with no entity id and no service
 name triggers **no query** and records why. Reading the tenant-wide error stream is never evidence.
 
+**S11 — Service metrics are read when the service reports them.**
+Acceptance: one `METRIC` item per incident entity from
+`timeseries sum(dt.service.request.count), sum(dt.service.request.failure_count),
+avg(dt.service.request.response_time)` with `filter: {dt.entity.service == "…"}`; the summary states a
+failure ratio and a latest-vs-baseline comparison, both unit-free, and the raw response-time series
+travels in the payload without a unit claim. A service with no request metrics produces no item.
+
 ## Out of scope, stated on purpose
 
 Metrics and per-service log filtering. A wrong metric selector returns an empty result silently, and the
@@ -77,6 +84,7 @@ empty. They land in the next slice once we have seen the tenant's metric catalog
 | T7 | S9 | `.env.example`, compose, `AGENTS.md`, `docs/PROJECT.md` | inline | done |
 | T8 | S9 | Live run: `provider-check` + `smoke` with the real platform token | inline | done |
 | T9 | S10 | Scope the log query to the incident's entities + environment, fail closed without one | inline | done |
+| T10 | S11 | Service metrics: failure ratio + trend per entity, absence tolerated | inline | done |
 
 ## Log
 
@@ -171,6 +179,25 @@ Live proof, same tenant, same window:
 - after `POST /incidents/webhook/dynatrace` with `entityId.id = SERVICE-30CF729466F91717`:
   **12 logs, all `order-handler`**, each with its `trace_id`.
 `provider-check` still queries wide on purpose: it is a diagnostic, not an investigation.
+
+**L10 — metrics, after reading the catalogue instead of guessing.**
+Probed against the tenant before writing anything: `dt.service.request.count`, `dt.service.request.failure_count`,
+`dt.service.request.response_time`, `dt.host.cpu.usage` and `dt.process.cpu.usage` all return data;
+`filter: {dt.entity.service == "…"}` inside `timeseries` works, including with several metrics in one call, and
+`by: {dt.entity.service}` returns one row per entity; the log-bucket query
+(`summarize count(), by: {bin(timestamp, 5m)}` then `sort timestamp`) fails with `FIELD_DOES_NOT_EXIST`, so it
+was dropped rather than worked around.
+
+Two findings that shaped the implementation:
+- **Request metrics are not universal.** `SERVICE-30CF729466F91717` (`order-handler`) reports no
+  `dt.service.request.*` at all while writing thousands of error logs, and 300 other services do. An empty
+  metrics answer is therefore normal and produces no item, never a failure note.
+- **The unit is Dynatrace's, not ours.** `response_time` looks like microseconds (146341 ≈ 146 ms), which is
+  plausible and unverified. The summary therefore claims only what is arithmetic on the arrays: a failure ratio
+  and a latest-vs-baseline comparison. The `rt` series rides in the payload raw.
+
+Live proof: an incident with `entity_ids: ["SERVICE-001301D820D224E8"]` produced
+`[metric] dynatrace conf=0.75 :: SERVICE-001301D820D224E8: failure ratio 100.00% (64 of 64); failures/interval 4 vs baseline 10 (steady)`.
 
 **L8 — pending mirror.**
 Engram is unavailable in this session (`could not resolve an authoritative OpenCode runtime session`), so
