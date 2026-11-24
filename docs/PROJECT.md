@@ -263,17 +263,40 @@ a new module plus one registry entry — never a change in `domain/` or
 `application/`. `tests/test_architecture.py` fails the build if a vendor noun
 reaches the core.
 
-**Dynatrace (the first adapter).** `adapters/outbound/dynatrace.py` is transport
-only (plain dicts); `dynatrace_provider.py` decides what becomes `Evidence`, what
-is inside the scope, and maps a transport failure onto `TelemetryUnavailable`.
-The incident's own problem record is reported as one `ALERT`; related events,
-DQL logs, metrics and evidence ranking are Roadmap Phase 1.
+**Dynatrace has two surfaces, and they are not interchangeable.**
 
-**Auth.** OAuth client credentials (`POST /sso/oauth2/token`, scope
-`problems.read events.read logs.read metrics.read`) or an API token
-(`Authorization: Api-Token ...`). OAuth wins when client id/secret are set. An
-adapter that has no credentials is not built at all, and the run degrades with a
+| Surface | Host | Credential | Gives |
+| --- | --- | --- | --- |
+| Classic API v2 (`dynatrace.py`) | `*.live.dynatrace.com/api/v2` | `Api-Token dt0c01…` | problems, events, metrics |
+| Platform / Grail (`dynatrace_platform.py`) | `*.apps.dynatrace.com/platform` | `Bearer dt0s16…` | DQL: logs, events, metrics, spans, bizevents |
+
+Investigation **prefers the platform surface**, because it is the only one that
+can read Grail, and Grail is where the evidence is: the Davis problem that fired
+(`fetch events | filter event.type == "davis"`) and the error logs the service is
+writing (`fetch logs | filter loglevel == "ERROR"`). The classic surface remains
+as a fallback for a tenant that only has an API token, where the incident's own
+problem record is reported as one `ALERT`.
+
+Two traps worth knowing, both learned against a live tenant:
+
+- The DQL path is `/platform/storage/query/v1/query:execute`. Without `/query/v1/`
+  the gateway answers `404 No static resource …` — it falls through to its static
+  handler, so the error looks like a missing file, not a wrong route.
+- DQL is asynchronous: `query:execute` returns a `state` and, when unfinished, a
+  `requestToken` to poll via `GET …/query:v1/query:poll`. The poll loop is bounded
+  by attempts, so an activity fails with a reason instead of hanging.
+
+**Credentials.** `DYNATRACE_PLATFORM_URL` + `DYNATRACE_PLATFORM_TOKEN` select the
+platform surface; `DYNATRACE_ENV_URL` + a read token (or OAuth client id/secret)
+select the classic one. A read token wins over OAuth when both are set, because
+`_auth_headers` checks it first — do not configure both and expect OAuth. An
+adapter with no usable credential is not built at all, and the run degrades with a
 recorded reason instead of failing to start.
+
+An ingest credential is not a read credential: a token that writes telemetry
+(`openpipeline:*:ingest`) answers `403 Token is missing required scope` on every
+read endpoint. Do not add read scopes to the token your applications use to emit
+telemetry.
 
 **Ingestion.** Polling
 `GET /api/v2/problems?problemSelector=status("OPEN")&from=now-2h`, or a
@@ -337,13 +360,13 @@ Temporal + LangGraph wired end to end, real approval signal, restart-durable
 runs, plugin activity options per node, API, CLI smoke, tests, docs. A dry run
 reports `resolved=false`: nothing was applied, so nothing was verified.
 
-**Phase 1 — real investigation.**
-Problem details, related events, logs (DQL), metrics; evidence ranking. The port
-and the provider seam already exist (`TelemetryProvider`, chosen in
-`worker.build_deps`; `make provider-check` proves the credentials), and today the
-Dynatrace adapter reports the incident's own problem record. Phase 1 is depth
-inside that adapter, plus per-run caching and 429 backoff: the node asks for
-evidence and never imports `httpx`.
+**Phase 1 — real investigation.** *Partly landed.*
+The port, the provider seam and the platform transport exist: a run reads Davis
+problems and error logs over DQL, inside the incident's own time window, filtered
+by the run's scope, and `make provider-check` proves the credential in one
+command. Still to do: metrics (needs the tenant's metric catalogue — a wrong
+selector returns an empty result silently), per-service log filtering, evidence
+ranking, per-run caching and 429 backoff.
 
 **Phase 2 — real planning.**
 LLM hypothesis generation, runbook retrieval, plan validation (reversible,

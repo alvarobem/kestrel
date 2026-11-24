@@ -8,6 +8,8 @@ something a unit test should reach over the network.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from kestrel.application.deps import CoreDeps
@@ -74,6 +76,21 @@ class StubExecutor:
             exit_code=0,
             stdout="stub",
         )
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the suite hermetic.
+
+    `Settings()` reads the process environment, and `make test` runs inside the
+    worker container, which `docker compose` fills with the operator's `.env`.
+    Without this, a configured machine turns every unit test into a live tenant
+    call: `build_deps(Settings())` would build a real client and the assertions
+    about the unconfigured path would fail against a real 403.
+    """
+    for name in list(os.environ):
+        if name.startswith(("DYNATRACE_", "LANGFUSE_", "LLM_")):
+            monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

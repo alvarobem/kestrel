@@ -34,6 +34,10 @@ x-agent-env: &agent-env
   # Exactly one telemetry adapter is active; the registry lives in
   # kestrel/adapters/outbound/providers.py.
   TELEMETRY_PROVIDER: ${TELEMETRY_PROVIDER:-dynatrace}
+  # Platform surface (Grail/DQL): preferred for investigation. Read-only
+  # scopes only (storage:*:read); never automation or ingest scopes.
+  DYNATRACE_PLATFORM_URL: ${DYNATRACE_PLATFORM_URL:-}
+  DYNATRACE_PLATFORM_TOKEN: ${DYNATRACE_PLATFORM_TOKEN:-}
   DYNATRACE_ENV_URL: ${DYNATRACE_ENV_URL:-}
   DYNATRACE_READ_TOKEN: ${DYNATRACE_READ_TOKEN:-}
   # DYNATRACE_WRITE_TOKEN is deliberately not injected here: no agent code path

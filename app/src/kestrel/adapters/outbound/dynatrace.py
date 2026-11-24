@@ -19,8 +19,10 @@ Endpoints used (verify against your tenant, they are versioned by Dynatrace):
   GET  /api/v2/problems/{problemId}
   GET  /api/v2/events
   GET  /api/v2/metrics/query
-  POST /platform/storage/query/execute          (DQL, Grail platforms)
   POST /sso/oauth2/token                        (client-credentials grant)
+
+DQL does not live here: it belongs to the platform surface, which has a
+different host and a different credential (`dynatrace_platform.py`).
 """
 
 from __future__ import annotations
@@ -142,20 +144,6 @@ class DynatraceClient:
             "/api/v2/metrics/query",
             params={"metricSelector": metric_selector, "from": lookback, "resolution": "5m"},
         )
-
-    def query_logs_dql(self, *, query: str, lookback: str = "now-2h", limit: int = 200) -> dict:
-        """DQL query over Grail. Requires the platform storage scope."""
-        response = self._http.post(
-            "/platform/storage/query/execute",
-            json={"query": query, "defaultTimeframeStart": lookback, "maxResultRecords": limit},
-            headers=self._auth_headers(),
-        )
-        if response.status_code >= 400:
-            raise DynatraceError(
-                f"DQL query failed: {response.status_code} {response.text[:300]}",
-                status_code=response.status_code,
-            )
-        return response.json()
 
     def close(self) -> None:
         self._http.close()

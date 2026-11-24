@@ -150,7 +150,7 @@ async def test_investigate_does_not_swallow_a_bug(state: dict, telemetry: Any) -
 
 
 async def test_dynatrace_maps_a_problem_onto_neutral_evidence() -> None:
-    adapter = dynatrace_provider.DynatraceTelemetryProvider(FakeDynatraceClient(_problem()))
+    adapter = dynatrace_provider.DynatraceTelemetryProvider(classic=FakeDynatraceClient(_problem()))
 
     found = await adapter.investigate(
         Incident(id="P-123", title="checkout latency"), InvestigationScope()
@@ -165,7 +165,7 @@ async def test_dynatrace_maps_a_problem_onto_neutral_evidence() -> None:
 
 
 async def test_dynatrace_returns_nothing_for_an_incident_outside_the_scope() -> None:
-    adapter = dynatrace_provider.DynatraceTelemetryProvider(FakeDynatraceClient(_problem()))
+    adapter = dynatrace_provider.DynatraceTelemetryProvider(classic=FakeDynatraceClient(_problem()))
 
     found = await adapter.investigate(
         Incident(id="P-123", title="checkout latency"),
@@ -176,7 +176,7 @@ async def test_dynatrace_returns_nothing_for_an_incident_outside_the_scope() -> 
 
 
 async def test_dynatrace_scope_matches_a_tag_value() -> None:
-    adapter = dynatrace_provider.DynatraceTelemetryProvider(FakeDynatraceClient(_problem()))
+    adapter = dynatrace_provider.DynatraceTelemetryProvider(classic=FakeDynatraceClient(_problem()))
 
     found = await adapter.investigate(
         Incident(id="P-123", title="checkout latency"),
@@ -189,14 +189,14 @@ async def test_dynatrace_scope_matches_a_tag_value() -> None:
 async def test_dynatrace_404_is_no_evidence_not_an_outage() -> None:
     """A manual or smoke incident is unknown to the tool; that is not a failure."""
     client = FakeDynatraceClient(error=DynatraceError("missing", status_code=404))
-    adapter = dynatrace_provider.DynatraceTelemetryProvider(client)
+    adapter = dynatrace_provider.DynatraceTelemetryProvider(classic=client)
 
     assert await adapter.investigate(Incident(id="smoke-1", title="t"), InvestigationScope()) == []
 
 
 async def test_dynatrace_transport_failure_becomes_the_port_error() -> None:
     client = FakeDynatraceClient(error=DynatraceError("boom", status_code=503))
-    adapter = dynatrace_provider.DynatraceTelemetryProvider(client)
+    adapter = dynatrace_provider.DynatraceTelemetryProvider(classic=client)
 
     with pytest.raises(TelemetryUnavailable) as raised:
         await adapter.investigate(Incident(id="P-1", title="t"), InvestigationScope())
@@ -272,3 +272,167 @@ def test_scope_is_unrestricted_until_tags_are_configured() -> None:
     assert InvestigationScope().allows(["anything"]) is True
     assert InvestigationScope(tags=("checkout",)).allows(["CHECKOUT"]) is True
     assert InvestigationScope(tags=("checkout",)).allows(["payments"]) is False
+
+
+# --- the platform surface: real evidence ------------------------------------
+
+
+class FakePlatformClient:
+    """The DQL transport's surface, with no HTTP underneath."""
+
+    def __init__(
+        self,
+        *,
+        problems: list[dict] | None = None,
+        logs: list[dict] | None = None,
+        errors: dict[str, Exception] | None = None,
+    ) -> None:
+        self.problems = problems or []
+        self.logs = logs or []
+        self.errors = errors or {}
+        self.queries: list[dict] = []
+        self.closed = False
+
+    def execute(self, query: str, *, start=None, end=None, max_records=50, **_kw) -> list[dict]:
+        kind = "davis" if "davis" in query else "logs"
+        self.queries.append({"kind": kind, "start": start, "end": end, "query": query})
+        if kind in self.errors:
+            raise self.errors[kind]
+        return self.problems if kind == "davis" else self.logs
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _real_log_record(**overrides: object) -> dict:
+    """Shaped from the tenant's actual response: these fields exist."""
+    record = {
+        "timestamp": "2026-11-24T09:42:11.227000000Z",
+        "content": "Request Error: Not allowed level <CLASICA>",
+        "loglevel": "ERROR",
+        "service.name": "lounge-manager",
+        "trace_id": "75d59033700d904161b55b4d2fca5d7d",
+        "dt.security_context": "customer-experience",
+        "deployment.environment.name": "prod",
+    }
+    record.update(overrides)
+    return record
+
+
+async def test_platform_investigation_returns_an_alert_and_a_log() -> None:
+    platform = FakePlatformClient(
+        problems=[{"timestamp": "t1", "davis.title": "checkout errors", "davis.status": "OPEN"}],
+        logs=[_real_log_record()],
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="checkout slow"), InvestigationScope()
+    )
+
+    assert [item.kind for item in found] == [EvidenceKind.ALERT, EvidenceKind.LOG]
+    assert {item.provider for item in found} == {"dynatrace"}
+    alert, log = found
+    assert "checkout errors" in alert.summary
+    assert log.external_id == "75d59033700d904161b55b4d2fca5d7d"
+    assert log.summary.startswith("lounge-manager:")
+
+
+async def test_platform_evidence_payload_is_projected_and_small() -> None:
+    long_content = "x" * 2000
+    platform = FakePlatformClient(logs=[_real_log_record(content=long_content)])
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+
+    payload = found[0].payload
+    assert set(payload) == {"timestamp", "loglevel", "service.name", "content"}
+    assert len(payload["content"]) < 600
+    assert payload["content"].endswith("…")
+
+
+async def test_platform_investigation_floors_the_window_of_a_stale_incident() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    platform = FakePlatformClient()
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+    stale = Incident(
+        id="P-1",
+        title="old",
+        started_at=datetime.now(UTC) - timedelta(hours=48),
+    )
+
+    await provider.investigate(stale, InvestigationScope())
+
+    start = datetime.fromisoformat(platform.queries[0]["start"])
+    age = datetime.now(UTC) - start
+    # Six hours back at most, never 48.
+    assert timedelta(hours=6, minutes=1) > age > timedelta(hours=5, minutes=55)
+
+
+async def test_platform_investigation_applies_the_run_scope() -> None:
+    platform = FakePlatformClient(
+        logs=[_real_log_record(**{"dt.security_context": "other-team", "service.name": "other"})]
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t"), InvestigationScope(tags=("customer-experience",))
+    )
+
+    assert found == []
+
+
+async def test_platform_scope_matches_a_semantic_attribute() -> None:
+    platform = FakePlatformClient(logs=[_real_log_record()])
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t"), InvestigationScope(tags=("customer-experience",))
+    )
+
+    assert len(found) == 1
+
+
+async def test_total_platform_failure_is_a_provider_outage() -> None:
+    from kestrel.adapters.outbound.dynatrace_platform import DynatracePlatformError
+
+    boom = DynatracePlatformError("query:execute -> 403: no scope", status_code=403)
+    platform = FakePlatformClient(errors={"davis": boom, "logs": boom})
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    with pytest.raises(TelemetryUnavailable) as raised:
+        await provider.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+
+    assert "403" in str(raised.value)
+
+
+async def test_a_partial_platform_failure_keeps_the_evidence_and_records_a_note() -> None:
+    from kestrel.adapters.outbound.dynatrace_platform import DynatracePlatformError
+
+    platform = FakePlatformClient(
+        logs=[_real_log_record()],
+        errors={"davis": DynatracePlatformError("davis query rejected")},
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+
+    kinds = [item.kind for item in found]
+    assert EvidenceKind.LOG in kinds
+    assert EvidenceKind.NOTE in kinds
+    note = next(item for item in found if item.kind == EvidenceKind.NOTE)
+    assert "davis problems unavailable" in note.summary
+
+
+async def test_the_provider_prefers_the_platform_surface() -> None:
+    platform = FakePlatformClient(logs=[_real_log_record()])
+    classic = FakeDynatraceClient(_problem())
+    provider = dynatrace_provider.DynatraceTelemetryProvider(  # type: ignore[arg-type]
+        platform=platform, classic=classic
+    )
+
+    await provider.investigate(Incident(id="P-1", title="t"), InvestigationScope())
+
+    assert classic.asked == []
+    assert platform.queries

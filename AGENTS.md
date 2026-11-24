@@ -80,7 +80,8 @@ app/src/kestrel/
     outbound/              we drive the world
       providers.py         provider registry: TELEMETRY_PROVIDER -> adapter
       dynatrace_provider.py Dynatrace as a TelemetryProvider (facts -> Evidence)
-      dynatrace.py         Dynatrace transport, plain data only
+      dynatrace_platform.py Dynatrace Grail/DQL transport (.apps + Bearer)
+      dynatrace.py         Dynatrace classic API v2 transport (.live + Api-Token)
       approval.py          ApprovalGateway: graph interrupt + auto
       runs.py              RunGateway over Temporal, engine errors translated
       temporal.py          client + data converter
@@ -269,6 +270,12 @@ history diverge.
 - **A new signal from an existing provider**: extend that provider's
   `investigate()`, returning plain domain `Evidence`. Depth lands there, not in
   the node: `investigate` never names a vendor.
+- **Anything Grail/DQL in Dynatrace**: `adapters/outbound/dynatrace_platform.py`.
+  The path is `/platform/storage/query/v1/query:execute` (the `/query/v1/` is not
+  optional: without it the gateway answers `404 No static resource`) and the
+  response is asynchronous — poll `query:poll` with the `requestToken`, bounded.
+  Only query fields you have seen in a real record: an unknown field fails the
+  whole query, so a guess costs evidence.
 - **Real LLM calls**: inside a node, so they get the activity's timeout and
   retry policy; keep prompts in Langfuse prompt management once stable; model
   output can never choose a command that bypasses the approval gate.
