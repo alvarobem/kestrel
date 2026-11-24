@@ -437,6 +437,12 @@ short-lived credentials, alerting on the agent itself.
    plan for a separate automation to execute?
 6. **Temporal hosting:** Cloud vs. self-hosted.
 7. **Model provider:** company-approved gateway vs. direct vendor API.
+8. **Change evidence (deployments):** Dynatrace already receives `CUSTOM_DEPLOYMENT`
+   events carrying the repository, sha, actor and release stage, but they are
+   attached to the *environment* entity, not to a service, so they cannot be
+   attributed to an incident (8 Production deploys can share one 30-minute
+   window). Deferred until the integration emits the service or process group in
+   its `entitySelector`; the agent reads them then with no new port.
 
 ## 17. Quickstart
 

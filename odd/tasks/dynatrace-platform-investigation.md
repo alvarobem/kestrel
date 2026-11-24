@@ -221,6 +221,31 @@ Live proof on the tenant, incident `PD-rank-1` (`order-handler`):
 `[log] order-handler: DBM-ROP Failed to retrieve airline information. (x12)` ranked above the triage note.
 Thirteen raw facts became two, and the one that explains the incident is first.
 
+**L12 — change evidence via deployment events: analyzed, then deferred by decision.**
+The tenant already ingests GitHub-Actions-borne deployments as `event.type == "CUSTOM_DEPLOYMENT"`, and they
+carry everything a change source would need *except* attribution:
+
+- `swe-platform.source_url` = `https://github.com/Iberia-Ent/commercial-management--ancillaries--bonos--services-bonos`
+  — the repository, straight from telemetry, so the service→repo mapping question disappears;
+- `swe-platform.sha`, `last_merge_commit`, `triggering_actor`, `workflow`, `deployment_outcome`,
+  `isRollback`, `deployment.release_stage`, `deployment.version`, `dt.event.correlation_id`.
+
+What blocks it: `affected_entity_ids` is `['ENVIRONMENT-0000000000000001']`. Deployments are attached to the
+**environment** entity, never to a service, so no deployment can be attributed to an incident. Measured
+volume makes that fatal rather than cosmetic: 8 `Production`, 11 `Preproduction`, 14 `Integration` deploys in
+one 30-minute window. Feeding those to the planner would repeat exactly the defect fixed in L9 — data that
+looks like evidence and is not.
+
+DQL lessons worth keeping (each one cost a probe): `arrayContains(...)` does not exist, `"x" in field` is a
+parse error, and a projected field containing dots or hyphens must be backticked
+(`` `swe-platform.source_url` ``), otherwise DQL reads it as a subtraction and returns `None` silently.
+
+Decision: **no deployment evidence for now.** The fix belongs in one place — the `swe-platform` integration
+should send the service or process group in the `entitySelector` instead of the environment — and it would
+make the change correlatable for Davis too, not only for us. Until then the investigation stays at Davis
+problems, scoped error logs and service metrics, and no `ChangeSource` port is added. When attribution
+arrives, the repo and the sha are already in the event, so GitHub enrichment becomes one `compare` call.
+
 **L8 — pending mirror.**
 Engram is unavailable in this session (`could not resolve an authoritative OpenCode runtime session`), so
 the recovery copy of this document is not written. The local file is authoritative.
