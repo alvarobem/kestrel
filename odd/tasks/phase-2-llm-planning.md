@@ -310,3 +310,34 @@ inventar, pero deja la herramienta sin aportar.
 Sin probar todavía en el stack completo: la rama `plan presente → interrupt → signal →
 execute(dry) → verify → report` con un plan del modelo. El resto del workflow sí está
 ejercitado por los runs reales de `make smoke`.
+
+**L15 (2026-11-24) — `java-micronaut`: hay datos reales, y la evidencia los adelgaza.**
+A pedido del usuario, mirado el servicio `SERVICE-426D7E321DA3E90E`
+(`service.name = java-micronaut`, 872.401 logs en 24h):
+
+```
+111 ERROR en 30m vs 122 antes — 0.9x, steady
+PMT_PPM_8009  351 ocurrencias en 36 mensajes distintos (idiomas)
+PMT_PPM_8015   19 en 3   PMT_PPM_8006  7 en 5   PMT_PPM_9015  7 en 4
+77 mensajes distintos -> 12 códigos
+```
+
+Son **rechazos de negocio** (tarjeta declinada, Apple Pay, transferencia, PayPal sin
+confirmar, cuota no aprobada), no una falla del servicio. El planner lo dijo bien:
+
+> `No remediation step is justified: the logs indicate payment-method or bank-account
+> failures, and the error volume is steady.`
+
+Dos defectos de la evidencia (fase 1) que este caso deja a la vista:
+
+1. **`_LOG_DQL` muestrea, no agrega**: `sort timestamp desc | limit N`. Se piden las
+   líneas más recientes, así que un pico de un solo error llena la muestra. La
+   evidencia trae 12 items `x1` cuando el código principal tiene 351 ocurrencias.
+2. **No hay identidad estable**: `merge_repeated` colapsa por texto exacto, así que el
+   mismo `PMT_PPM_8009` en cinco idiomas son cinco hallazgos distintos. La identidad
+   del hallazgo es el **código**, no la frase.
+
+Lo que esto cuesta: ni el humano ni el modelo pueden distinguir "un error raro" de
+"un fallo sistémico en 36 variantes". Y arreglarlo habilita lo que de verdad falta
+para un plan: **baseline por código** — "`PMT_PPM_8015` apareció hoy", que sí es una
+causa candidata y sí justifica una acción.
