@@ -285,12 +285,16 @@ class FakePlatformClient:
         *,
         problems: list[dict] | None = None,
         logs: list[dict] | None = None,
+        logs_before: list[dict] | None = None,
         metrics: list[dict] | None = None,
         counts: list[int] | None = None,
         errors: dict[str, Exception] | None = None,
     ) -> None:
         self.problems = problems or []
         self.logs = logs or []
+        #: Answers for the aggregations over the span before the window.
+        self.logs_before = logs_before or []
+        self.log_queries = 0
         self.metrics = metrics or []
         #: Answers for the two count queries, in order: current window, then baseline.
         self.counts = list(counts or [])
@@ -313,22 +317,25 @@ class FakePlatformClient:
         if kind == "count":
             value = self.counts.pop(0) if self.counts else 0
             return [{"n": str(value)}]
-        return {"davis": self.problems, "metrics": self.metrics, "logs": self.logs}[kind]
+        if kind == "logs":
+            # The first log query is the window; the second is the span before it.
+            rows = self.logs if self.log_queries == 0 else self.logs_before
+            self.log_queries += 1
+            return rows
+        return {"davis": self.problems, "metrics": self.metrics}[kind]
 
     def close(self) -> None:
         self.closed = True
 
 
 def _real_log_record(**overrides: object) -> dict:
-    """Shaped from the tenant's actual response: these fields exist."""
+    """Shaped from the tenant's aggregate response: these fields exist."""
     record = {
-        "timestamp": "2026-11-24T09:42:11.227000000Z",
         "content": "Request Error: Not allowed level <CLASICA>",
-        "loglevel": "ERROR",
+        "hits": "1",
         "service.name": "lounge-manager",
-        "trace_id": "75d59033700d904161b55b4d2fca5d7d",
+        "dt.entity.service": "SERVICE-1",
         "dt.security_context": "customer-experience",
-        "deployment.environment.name": "prod",
     }
     record.update(overrides)
     return record
@@ -355,8 +362,9 @@ async def test_platform_investigation_returns_an_alert_and_a_log() -> None:
     assert {item.provider for item in found} == {"dynatrace"}
     alert, log = found
     assert "checkout errors" in alert.summary
-    assert log.external_id == "75d59033700d904161b55b4d2fca5d7d"
+    assert "Not allowed level" in log.summary
     assert log.summary.startswith("lounge-manager:")
+    assert log.occurrences == 1
 
 
 async def test_platform_evidence_payload_is_projected_and_small() -> None:
@@ -367,9 +375,102 @@ async def test_platform_evidence_payload_is_projected_and_small() -> None:
     found = await provider.investigate(Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope())
 
     payload = found[0].payload
-    assert set(payload) == {"timestamp", "loglevel", "service.name", "content"}
+    assert set(payload) == {
+        "service.name",
+        "content",
+        "code",
+        "hits",
+        "variants",
+        "hits_before",
+        "window_minutes",
+    }
     assert len(payload["content"]) < 600
     assert payload["content"].endswith("…")
+
+
+async def test_logs_are_grouped_by_code_across_translations() -> None:
+    """The same failure in five languages is one finding, not five.
+
+    This is what the tenant actually returns: `PMT_PPM_8009` with 36 message
+    variants. Grouping by the sentence produced 77 findings of one occurrence and
+    hid a 351-occurrence failure.
+    """
+    platform = FakePlatformClient(
+        logs=[
+            _real_log_record(
+                content="PMT Error; code: PMT_PPM_8009; reason: No hemos podido realizar el cargo",
+                hits="87",
+            ),
+            _real_log_record(
+                content="PMT Error; code: PMT_PPM_8009; reason: We were unable to debit your card",
+                hits="52",
+            ),
+            _real_log_record(
+                content="PMT Error; code: PMT_PPM_8015; reason: No es posible realizar la compra",
+                hits="19",
+            ),
+        ]
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t", affected_entities=["lounge-manager"], entity_ids=["SERVICE-1"]),
+        InvestigationScope(),
+    )
+
+    logs = [item for item in found if item.kind == EvidenceKind.LOG]
+    assert [item.external_id for item in logs] == ["PMT_PPM_8009", "PMT_PPM_8015"]
+    assert logs[0].occurrences == 139
+    assert "across 2 variants" in logs[0].summary
+    assert "139 time(s)" in logs[0].summary
+
+
+async def test_a_code_is_compared_against_its_own_previous_window() -> None:
+    platform = FakePlatformClient(
+        logs=[_real_log_record(content="PMT Error; code: PMT_PPM_9015; reason: boom", hits="100")],
+        logs_before=[
+            _real_log_record(content="PMT Error; code: PMT_PPM_9015; reason: boom", hits="10")
+        ],
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope()
+    )
+
+    log = next(item for item in found if item.kind == EvidenceKind.LOG)
+    assert "10.0x the 10 before (rising)" in log.summary
+
+
+async def test_a_code_that_did_not_exist_before_is_reported_as_new() -> None:
+    platform = FakePlatformClient(
+        logs=[_real_log_record(content="PMT Error; code: PMT_PPM_8015; reason: boom", hits="19")]
+    )
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    found = await provider.investigate(
+        Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope()
+    )
+
+    log = next(item for item in found if item.kind == EvidenceKind.LOG)
+    assert "new in this window" in log.summary
+
+
+async def test_the_log_query_aggregates_instead_of_sampling() -> None:
+    platform = FakePlatformClient()
+    provider = dynatrace_provider.DynatraceTelemetryProvider(platform=platform)  # type: ignore[arg-type]
+
+    await provider.investigate(
+        Incident(id="P-1", title="t", affected_entities=["lounge-manager"]), InvestigationScope()
+    )
+
+    log_queries = [entry["query"] for entry in platform.queries if entry["kind"] == "logs"]
+    assert log_queries
+    for query in log_queries:
+        # The bug: `sort timestamp desc` samples the newest lines. The count has to
+        # come from the tenant, and the order has to be by frequency.
+        assert "summarize hits = count()" in query
+        assert "sort timestamp desc" not in query
 
 
 async def test_platform_investigation_floors_the_window_of_a_stale_incident() -> None:

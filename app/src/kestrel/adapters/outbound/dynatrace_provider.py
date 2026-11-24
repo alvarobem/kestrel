@@ -24,6 +24,7 @@ guess here costs real evidence.
 from __future__ import annotations
 
 import asyncio
+import re
 import statistics
 from datetime import UTC, datetime, timedelta
 
@@ -46,14 +47,22 @@ _DAVIS_DQL = (
     "| fields timestamp, davis.title, davis.status | sort timestamp desc | limit {limit}"
 )
 
-#: Error logs, newest first, **scoped to the incident**. The `{filters}` part is
-#: built per incident: without a target there is no query at all (see
-#: `_log_dql`). Every projected field was observed in a real record from the
-#: tenant.
-_LOG_DQL = (
+#: Error logs, aggregated in the tenant and **scoped to the incident**. The
+#: `{filters}` part is built per incident: without a target there is no query at all
+#: (see `_log_filters`).
+#:
+#: It used to fetch the most recent N lines, which is a sample, not a measurement:
+#: one noisy error filled the whole sample and a 351-occurrence failure appeared as
+#: twelve findings of one occurrence each. Grouping by content counts everything in
+#: the window, and the scope fields travel with each group so the run filter still
+#: applies. `dt.security_context` is included for that reason; a deployment that
+#: scopes on a field outside this list will see log evidence narrowed away, which
+#: fails closed.
+_LOG_GROUP_DQL = (
     "fetch logs | filter {filters} "
-    "| fields timestamp, content, loglevel, service.name, trace_id "
-    "| sort timestamp desc | limit {limit}"
+    "| summarize hits = count(), by: "
+    "{{content, service.name, dt.entity.service, dt.security_context}} "
+    "| sort hits desc | limit {limit}"
 )
 
 #: The same filter, counted instead of listed: the volume of this incident's
@@ -91,7 +100,12 @@ _MAX_WINDOW = timedelta(hours=6)
 #: which is exactly what a live run proved.
 _CONTEXT_BEFORE = timedelta(minutes=30)
 _MAX_PROBLEMS = 5
-_MAX_LOGS = 12
+#: Distinct messages fetched for aggregation. The tenant groups, so this bounds the
+#: groups returned, not the lines scanned: one query counts every error in the
+#: window instead of sampling the most recent ones.
+_MAX_LOG_GROUPS = 200
+#: Findings emitted. A human reads five; the planner gets the same handful.
+_MAX_LOG_FINDINGS = 5
 _MAX_METRICS = 3
 _MAX_TEXT = 500
 _MAX_POINTS = 12
@@ -250,10 +264,20 @@ class DynatraceTelemetryProvider:
         logs, log_error = await asyncio.to_thread(
             _query,
             platform,
-            _LOG_DQL.format(filters=filters, limit=_MAX_LOGS),
+            _LOG_GROUP_DQL.format(filters=filters, limit=_MAX_LOG_GROUPS),
             start.isoformat(),
             end.isoformat(),
-            _MAX_LOGS,
+            _MAX_LOG_GROUPS,
+        )
+        # The same aggregation over the span immediately before: a code that did
+        # not exist yesterday is an incident, whatever its absolute volume.
+        previous_logs, previous_log_error = await asyncio.to_thread(
+            _query,
+            platform,
+            _LOG_GROUP_DQL.format(filters=filters, limit=_MAX_LOG_GROUPS),
+            (start - span).isoformat(),
+            start.isoformat(),
+            _MAX_LOG_GROUPS,
         )
         metrics, metrics_error = (
             await asyncio.to_thread(
@@ -279,9 +303,14 @@ class DynatraceTelemetryProvider:
         for record in problems:
             if scope.allows(_record_scope_candidates(record)):
                 evidence.append(_davis_evidence(record))
-        for record in logs:
-            if scope.allows(_record_scope_candidates(record)):
-                evidence.append(_log_evidence(record))
+        minutes = max(1, int(span.total_seconds() // 60))
+        evidence.extend(
+            _log_findings(
+                [row for row in logs if scope.allows(_record_scope_candidates(row))],
+                [row for row in previous_logs if scope.allows(_record_scope_candidates(row))],
+                minutes,
+            )
+        )
         for record in metrics:
             item = _metric_evidence(record)
             if item is not None:
@@ -291,7 +320,7 @@ class DynatraceTelemetryProvider:
             baseline = _baseline_evidence(
                 _count(current_rows),
                 _count(previous_rows),
-                max(1, int(span.total_seconds() // 60)),
+                minutes,
             )
             if baseline is not None:
                 evidence.append(baseline)
@@ -299,6 +328,7 @@ class DynatraceTelemetryProvider:
         for label, error in (
             ("davis problems", problem_error),
             ("error logs", log_error),
+            ("error log baseline", previous_log_error),
             ("service metrics", metrics_error),
             ("error baseline", baseline_error),
         ):
@@ -467,7 +497,7 @@ def _log_filters(targets: list[str], environment: str | None) -> str:
 
 def _log_dql(targets: list[str], environment: str | None, limit: int) -> str:
     """The error-log query, scoped to this incident."""
-    return _LOG_DQL.format(filters=_log_filters(targets, environment), limit=limit)
+    return _LOG_GROUP_DQL.format(filters=_log_filters(targets, environment), limit=limit)
 
 
 def _count(records: list[dict]) -> int:
@@ -552,18 +582,123 @@ def _davis_evidence(record: dict) -> Evidence:
     )
 
 
-def _log_evidence(record: dict) -> Evidence:
-    service = str(record.get("service.name") or "unknown service")
-    content = str(record.get("content") or "")
-    return Evidence(
-        provider=PROVIDER_ID,
-        kind=EvidenceKind.LOG,
-        summary=f"{service}: {content[:200]}",
-        # The trace id is the handle that ties this log to the request that failed.
-        external_id=str(record["trace_id"]) if record.get("trace_id") else None,
-        payload=_project(record, ("timestamp", "loglevel", "service.name", "content")),
-        confidence=0.6,
-    )
+def _log_findings(
+    rows: list[dict], previous: list[dict], minutes: int
+) -> list[Evidence]:
+    """One finding per error code, with its own baseline.
+
+    The same failure arrives translated into five languages, so the sentence is not
+    the identity: the code inside it is. Grouping by code turns 77 translated
+    messages into 12 findings, and comparing each code against the window before it
+    answers the only question worth asking at an approval gate — is this new, is it
+    worse, or is it the status quo.
+    """
+    if not rows:
+        return []
+
+    before = _hits_by_key(previous)
+    groups: dict[str, dict] = {}
+    for row in rows:
+        content = " ".join(str(row.get("content") or "").split())
+        if not content:
+            continue
+        key = _error_code(content) or content
+        group = groups.setdefault(
+            key,
+            {
+                "code": _error_code(content),
+                "hits": 0,
+                "variants": 0,
+                "sample": content,
+                "service": str(row.get("service.name") or "unknown service"),
+            },
+        )
+        group["hits"] += _hits(row)
+        group["variants"] += 1
+        if len(content) > len(group["sample"]):
+            group["sample"] = content
+
+    findings: list[Evidence] = []
+    for key, group in sorted(groups.items(), key=lambda item: item[1]["hits"], reverse=True)[
+        :_MAX_LOG_FINDINGS
+    ]:
+        label = group["code"] or f'"{_clip(group["sample"], 120)}"'
+        detail = [f"{group['hits']:,} time(s) in {minutes}m"]
+        if group["variants"] > 1:
+            detail.append(f"across {group['variants']} variants")
+        detail.append(_baseline_phrase(group["hits"], before.get(key, 0)))
+        summary = f"{group['service']}: {label} — {', '.join(detail)}"
+        if group["code"]:
+            summary += f'; e.g. "{_clip(group["sample"], 140)}"'
+        findings.append(
+            Evidence(
+                provider=PROVIDER_ID,
+                kind=EvidenceKind.LOG,
+                summary=summary,
+                # The code is the stable handle: it is what a reviewer cites and
+                # what a retried investigation dedupes on.
+                external_id=group["code"],
+                payload={
+                    "service.name": group["service"],
+                    "content": _clip(group["sample"], _MAX_TEXT),
+                    "code": group["code"],
+                    "hits": group["hits"],
+                    "variants": group["variants"],
+                    "hits_before": before.get(key, 0),
+                    "window_minutes": minutes,
+                },
+                confidence=0.6,
+                occurrences=group["hits"],
+            )
+        )
+    return findings
+
+
+#: The tenant writes the stable identity of a failure inside the message
+#: (`PMT Error; code: PMT_PPM_8009; reason: …`). Seen in a live record, not guessed.
+_CODE_PATTERN = re.compile(r"code:\s*([A-Za-z0-9_.-]{3,})")
+
+
+def _error_code(content: str) -> str | None:
+    match = _CODE_PATTERN.search(content)
+    return match.group(1) if match else None
+
+
+def _hits(row: dict) -> int:
+    for field in ("hits", "n"):
+        if field in row:
+            try:
+                return int(float(str(row[field])))
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _hits_by_key(rows: list[dict]) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for row in rows:
+        content = " ".join(str(row.get("content") or "").split())
+        if not content:
+            continue
+        key = _error_code(content) or content
+        totals[key] = totals.get(key, 0) + _hits(row)
+    return totals
+
+
+def _baseline_phrase(current: int, previous: int) -> str:
+    """Is this worse than it was, new, or the status quo?"""
+    if previous <= 0:
+        return "new in this window" if current > 0 else "no occurrences"
+    ratio = current / previous
+    if ratio >= 1.5:
+        return f"{ratio:.1f}x the {previous:,} before (rising)"
+    if ratio <= 0.67:
+        return f"{ratio:.1f}x the {previous:,} before (falling)"
+    return f"{ratio:.1f}x the {previous:,} before (steady)"
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _metric_evidence(record: dict) -> Evidence | None:

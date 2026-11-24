@@ -341,3 +341,40 @@ Lo que esto cuesta: ni el humano ni el modelo pueden distinguir "un error raro" 
 "un fallo sistémico en 36 variantes". Y arreglarlo habilita lo que de verdad falta
 para un plan: **baseline por código** — "`PMT_PPM_8015` apareció hoy", que sí es una
 causa candidata y sí justifica una acción.
+
+**L16 — arreglado, y verificado contra el tenant.** La consulta ahora agrega en
+`Dynatrace` (`summarize hits = count(), by: {content, service.name, dt.entity.service,
+dt.security_context}`) y el proveedor agrupa por **código**, no por frase. Cada
+hallazgo lleva sus ocurrencias y su propia comparación contra la ventana anterior.
+Misma evidencia, antes y después:
+
+```
+antes (12 items, todos x1):
+  [log] x1 java-micronaut: PMT Error; code: PMT_PPM_8009; reason: Se ha rechazado…
+  [log] x1 java-micronaut: PMT Error; code: PMT_PPM_8009; reason: No hemos podido…
+  ...
+
+después (5 items):
+  [log] x64 java-micronaut: PMT_PPM_8009 — 64 en 30m, across 14 variants,
+        0.6x the 103 before (falling); e.g. "…"
+  [log] x7  java-micronaut: PMT_PPM_8015 — 7 en 30m, across 2 variants,
+        2.3x the 3 before (rising)
+  [log] x5  java-micronaut: PMT_PPM_8016 — 5 en 30m, new in this window
+        ("We are having problems with the Avios service")
+  [log] x4  java-micronaut: PMT_PPM_8006 — 4 en 30m, 4.0x the 1 before (rising)
+  [metric] error log volume: 93 en 30m vs 135 before — 0.7x, steady
+```
+
+El planner **sigue declinando**, y ahora por una razón mejor:
+
+> `No workload change is justified: the errors point to payment-method or Avios-service
+> failures, and overall error volume is falling.`
+
+Correcta: `PMT_PPM_8016` es una dependencia externa (Avios) caída, y un `rollout
+restart` de `java-micronaut` no la arregla. Lo que falta no es evidencia sino
+**capacidades que correspondan al incidente real** (abrir incidencia contra la
+integración, revertir un cambio de configuración), y eso es decisión del operador.
+
+Nota de alcance dejada a propósito: las filas agregadas llevan `dt.security_context`
+pero no el resto de `_SCOPE_FIELDS`; un despliegue que filtre por un campo fuera de la
+lista verá menos evidencia de logs (falla cerrado, nunca abre de más).
